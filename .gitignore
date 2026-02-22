@@ -205,3 +205,11 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# --- Solana Agent Specifics ---
+# Ignore the programmatic wallet files containing private keys
+wallet_*.json
+*.json
+
+# Ignore environment variables (just in case it wasn't caught above)
+.env
