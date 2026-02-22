@@ -1,5 +1,6 @@
 import os, asyncio, httpx, random, nest_asyncio, logging, collections, json
 from datetime import datetime
+from aiohttp import web  # Added for Render Health Check
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
@@ -31,6 +32,10 @@ MINTS = {
     "RENDER": "rndr9szSra8f5SscRsc5F9S5X5X5X5X5X5X5X5X5X5X"
 }
 MESH_LIST = list(MINTS.keys())
+
+# --- RENDER HEALTH CHECK ---
+async def handle_health(request):
+    return web.Response(text="Bot is Active")
 
 def main_menu_keyboard():
     keyboard = [
@@ -180,16 +185,38 @@ async def button_handler(update, context):
         h = "\n".join(agent.history[-5:]) if agent.history else "No trades yet."
         await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
 
-# --- FIXED DEPLOYMENT BLOCK ---
-if __name__ == "__main__":
+# --- FINAL STABLE ENTRY POINT ---
+async def main():
     if not TELEGRAM_TOKEN:
         print("Error: TELEGRAM_TOKEN not set.")
-    else:
-        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CallbackQueryHandler(button_handler))
-        
-        print("--- 🤖 AGENTIC SCALPER ONLINE ---")
-        # run_polling handles the event loop and cleanup automatically
-        app.run_polling(drop_pending_updates=True)
+        return
+
+    # Start Health Server for Render
+    webapp = web.Application()
+    webapp.router.add_get('/', handle_health)
+    runner = web.AppRunner(webapp); await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
+    print(f"📡 Health check server live on port {port}")
+
+    # Build and Start Telegram Bot
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    print("--- 🤖 AGENTIC SCALPER ONLINE ---")
+    
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        # Keep alive
+        while True:
+            await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
         
