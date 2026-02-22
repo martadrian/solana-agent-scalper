@@ -1,0 +1,6 @@
+python-telegram-bot
+httpx
+solana
+solders
+nest_asyncio
+python-dotenv
