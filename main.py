@@ -44,10 +44,8 @@ def main_menu_keyboard():
 class SolanaAgent:
     def __init__(self, chat_id):
         self.chat_id = chat_id
-        # PERSISTENCE: Load existing wallet or create new
         self.wallet_path = f"wallet_{chat_id}.json"
         self.keypair = self.load_or_create_keypair()
-        
         self.client = AsyncClient(RPC_URL, commitment=Confirmed)
         self.history = []
         self.is_running = False
@@ -56,7 +54,7 @@ class SolanaAgent:
         self.active_pair = None
         self.buy_time = None
         self.trade_amount_sol = 0.1
-        self.fee_buffer_pct = 0.021 # Covers ~0.002 SOL fee on a 0.1 SOL trade
+        self.fee_buffer_pct = 0.021
         self.watch_registry = {}
 
     def load_or_create_keypair(self):
@@ -106,21 +104,17 @@ async def scalping_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     pairs_to_watch = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
     agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs_to_watch}
-
     await bot.send_message(chat_id, "📡 **Agent Wallet Persistent**\nRadar active on 10 pairs.")
-
     while agent.is_running:
         if not agent.active_pair:
             tasks = [agent.fetch_current_price(p) for p in pairs_to_watch]
             results = await asyncio.gather(*tasks)
-
             for pair, price in results:
                 data = agent.watch_registry[pair]
                 if data["last"] != 0 and price < data["last"]:
                     data["drops"] += 1
                 else: data["drops"] = 0
                 data["last"] = price
-
                 if data["drops"] >= 4:
                     sig, amt = await agent.execute_trade_action("BUY", pair, price)
                     if sig:
@@ -130,13 +124,10 @@ async def scalping_loop(chat_id, bot):
                         await bot.send_message(chat_id, f"🎯 **ENTRY: {pair}**\nBought `${price:.4f}`. Window 1 starts.")
                         break
             await asyncio.sleep(1)
-
         else:
             _, curr_price = await agent.fetch_current_price(agent.active_pair)
             elapsed = (datetime.now() - agent.buy_time).total_seconds()
             profit_pct = (curr_price - agent.position) / agent.position
-
-            # 1. WINDOW 1 (0-30s) - Only TP if covering 0.002 SOL fees
             if elapsed <= 30:
                 if profit_pct >= agent.fee_buffer_pct:
                     await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
@@ -146,8 +137,6 @@ async def scalping_loop(chat_id, bot):
                     await agent.execute_trade_action("SELL (30s Profit)", agent.active_pair, curr_price)
                     await bot.send_message(chat_id, "💰 **30s Exit:** Locked in profit.")
                     agent.active_pair = None
-
-            # 2. WINDOW 2 (31-60s) - Recovery Exit
             elif 30 < elapsed <= 60:
                 if curr_price > agent.position:
                     await agent.execute_trade_action("SELL (Recovery)", agent.active_pair, curr_price)
@@ -157,12 +146,10 @@ async def scalping_loop(chat_id, bot):
                     await agent.execute_trade_action("SELL (Time Limit)", agent.active_pair, curr_price)
                     await bot.send_message(chat_id, "🛑 **60s Limit:** Force closed position.")
                     agent.active_pair = None
-
             if agent.active_pair:
                 agent.watch_registry[agent.active_pair]["last"] = curr_price
             await asyncio.sleep(1)
 
-# --- BOILERPLATE HANDLERS ---
 class AgentManager:
     def __init__(self): self.users = {}
     def get_agent(self, chat_id):
@@ -193,23 +180,16 @@ async def button_handler(update, context):
         h = "\n".join(agent.history[-5:]) if agent.history else "No trades yet."
         await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
 
-async def run_main():
-    if not TELEGRAM_TOKEN: return
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    await app.initialize(); await app.start()
-    print("--- 🤖 AGENTIC SCALPER ONLINE ---")
-    offset = 0
-    try:
-        while True:
-            updates = await app.bot.get_updates(offset=offset, timeout=10)
-            for u in updates:
-                await app.process_update(u); offset = u.update_id + 1
-            await asyncio.sleep(0.5)
-    finally:
-        await app.stop(); await app.shutdown()
-
+# --- FIXED DEPLOYMENT BLOCK ---
 if __name__ == "__main__":
-    asyncio.run(run_main())
-  
+    if not TELEGRAM_TOKEN:
+        print("Error: TELEGRAM_TOKEN not set.")
+    else:
+        app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        
+        print("--- 🤖 AGENTIC SCALPER ONLINE ---")
+        # run_polling handles the event loop and cleanup automatically
+        app.run_polling(drop_pending_updates=True)
+        
