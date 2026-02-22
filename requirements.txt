@@ -5,3 +5,4 @@ solders
 nest_asyncio
 python-dotenv
 aiohttp
+requests
