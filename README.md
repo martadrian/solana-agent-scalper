@@ -3,7 +3,27 @@
 
 This repository features a fully autonomous, agentic wallet designed for the Solana Devnet. It doesn't just execute trades; it "guards" them using a sophisticated dual-window time strategy to ensure maximum capital efficiency and profit protection.
 
+## 🌟 Live Demo
+Experience the autonomous agent in action on Telegram:
+👉 **[@Aiagentscalperbot](https://t.me/Aiagentscalperbot)**
 
+---
+
+## 🎮 Telegram Interface & Functionality
+The agent is managed entirely through an interactive Telegram menu. Once you send `/start`, the agent initializes your unique persistent wallet and presents the following dashboard:
+
+### 🛠️ Menu Buttons & Logic
+- **🚀 Start Scalping**: 
+  - *Internal Trigger:* `run`
+  - *Action:* Activates the autonomous "Mesh Hunter." The agent begins scanning the top 10 token pairs every second. It looks for 4 consecutive 1-second price drops to execute a high-probability entry.
+- **🛑 Stop Agent**: 
+  - *Action:* Gracefully terminates the hunting loop. If a trade is currently active, the agent will continue to manage the exit strategy before stopping to protect your capital.
+- **💼 Wallet**: 
+  - *Action:* On-chain query to display your live **Devnet SOL Balance** and your unique **Programmatic Public Key**.
+- **📜 Swap History**: 
+  - *Action:* Pulls the last 5 trades from the local history, showing the token pair, buy price, sell price, and the exact timestamp of execution.
+
+---
 
 ## 🌟 Key Features
 - **Parallel Mesh Hunter**: Simultaneously monitors the top 10 SPL token pairs (SOL, JUP, RAY, etc.) for rapid momentum shifts.
@@ -19,13 +39,13 @@ This repository features a fully autonomous, agentic wallet designed for the Sol
 The agent utilizes the `solders` library to create and manage an on-chain identity. Unlike a standard browser wallet, this **Agentic Wallet**:
 * **Autonomous Generation**: Generates its own cryptographic Keypair programmatically upon initialization (`Keypair()`).
 * **Non-Interactive Signing**: Signs transactions automatically within the execution loop using the `solders.transaction.Transaction` class.
-* **Self-Aware Balance**: Monitors its own SOL and SPL token balances via the `AsyncClient` to determine trade viability before sending instructions.
+* **Identity Persistence**: Saves the secret key locally in a `wallet_{chat_id}.json` file. This ensures your wallet address and funds remain consistent even if the server restarts.
 
 ### 2. Security Considerations
 * **Non-Custodial Logic**: Private keys are generated and stored only within the execution environment and are never transmitted.
 * **Environment Isolation**: Uses `os.getenv` to keep sensitive credentials (like your Telegram Token) out of the source code.
 * **Risk Mitigation**: The 60-second hard exit prevents "bag holding" and protects the 0.1 SOL trade size from long-term downtrends.
-* **Fee Awareness**: The agent is programmed with a "Profit Margin Floor" (~0.002 SOL) to ensure transaction fees do not erode the principal.
+* **Fee Awareness**: The agent is programmed with a "Profit Margin Floor" (~0.002 SOL / 2.1%) to ensure transaction fees do not erode the principal.
 
 ### 3. The "Profit Guardian" Strategy
 The agent follows a strict temporal logic to solve the "bag-holding" problem in volatile markets:
@@ -59,20 +79,6 @@ cd solana-agent-scalper
 # Install required Python dependencies
 pip install -r requirements.txt
 
-# Create a .env file for your credentials
+# Create a .env file for your credentials (FOR LOCAL TESTING ONLY)
 echo "TELEGRAM_TOKEN=your_telegram_bot_token_here" > .env
 echo "RPC_URL=[https://api.devnet.solana.com](https://api.devnet.solana.com)" >> .env
-3. Requirements File (requirements.txt)
-Ensure your requirements.txt contains the following:
-python-telegram-bot
-httpx
-solana
-solders
-nest_asyncio
-python-dotenv
-4. Agent Skills Manifest (SKILL.md)
-To comply with agentic standards, this repo includes a machine-readable skill manifest located at:
-/.agents/skills/solana-scalper/SKILL.md
-This file allows other AI agents to discover this wallet's capabilities, including parallel monitoring and automated trade execution.
-🚀 Execution
-Start the agent and message it /start on Telegram to initialize your programmatic wallet:
