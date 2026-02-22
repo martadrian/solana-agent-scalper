@@ -1,6 +1,6 @@
 import os, asyncio, httpx, random, nest_asyncio, logging, collections, json
 from datetime import datetime
-from aiohttp import web  # Added for Render Health Check
+from aiohttp import web  # Ensure this is in requirements.txt
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
@@ -17,6 +17,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 RAYDIUM_API = "https://api-v3-devnet.raydium.io/pools/info/mint"
 
+# Tokens and Mint Addresses for the Scalper Mesh
 MINTS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr",
@@ -185,38 +186,51 @@ async def button_handler(update, context):
         h = "\n".join(agent.history[-5:]) if agent.history else "No trades yet."
         await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
 
-# --- FINAL STABLE ENTRY POINT ---
+# --- FINAL STABLE ENTRY POINT FOR RENDER ---
 async def main():
     if not TELEGRAM_TOKEN:
         print("Error: TELEGRAM_TOKEN not set.")
         return
 
-    # Start Health Server for Render
+    # 1. Start Health Server (Port 10000)
     webapp = web.Application()
     webapp.router.add_get('/', handle_health)
-    runner = web.AppRunner(webapp); await runner.setup()
+    runner = web.AppRunner(webapp)
+    await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     await web.TCPSite(runner, '0.0.0.0', port).start()
     print(f"📡 Health check server live on port {port}")
 
-    # Build and Start Telegram Bot
+    # 2. Initialize Telegram Application manually to avoid Weak Reference bug
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    print("--- 🤖 AGENTIC SCALPER ONLINE ---")
+    await app.initialize()
+    await app.start()
     
-    async with app:
-        await app.initialize()
-        await app.start()
+    if app.updater:
         await app.updater.start_polling(drop_pending_updates=True)
-        # Keep alive
+        print("--- 🤖 AGENTIC SCALPER ONLINE ---")
+    
+    # 3. Keep the loop alive manually
+    try:
         while True:
             await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+        print("Shutting down...")
+    finally:
+        if app.updater:
+            await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
 
 if __name__ == "__main__":
+    # Create and set a fresh event loop
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
-        
+        loop.run_until_complete(main())
+    except Exception as e:
+        print(f"Main Loop Crash: {e}")
+            
