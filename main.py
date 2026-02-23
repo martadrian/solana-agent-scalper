@@ -4,7 +4,7 @@ from aiohttp import web
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
-from solders.compute_budget import set_compute_unit_price  # New for Priority Fees
+from solders.compute_budget import set_compute_unit_price 
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -53,11 +53,11 @@ class SolanaAgent:
         self.client = AsyncClient(RPC_URL, commitment=Confirmed)
         self.history, self.is_running = [], False
         self.active_pair, self.position, self.buy_time = None, None, None
+        self.current_trade_amt = 0
         self.watch_registry = {}
         
-        # --- GIGA BALANCE OPTIMIZATION ---
-        self.fee_buffer_pct = 0.012  # Set to 1.2% profit target (Safe for 5 SOL)
-        self.priority_fee = 150000   # Priority fee in micro-lamports to ensure execution
+        self.fee_buffer_pct = 0.012  # 1.2% profit target
+        self.priority_fee = 150000 
 
     def load_or_create_keypair(self):
         if os.path.exists(self.wallet_path):
@@ -81,32 +81,20 @@ class SolanaAgent:
                 return pair_name, float(r.json()['data'][0]['price'])
             except: return pair_name, 85.0 + random.uniform(-0.1, 0.1)
 
-    async def execute_trade_action(self, side, pair, price):
+    async def execute_trade_action(self, side, pair, price, trade_amount):
         try:
-            # DYNAMIC SIZING: 10% of current balance
-            current_bal = await self.get_balance()
-            trade_amount = current_bal * 0.10
-            if trade_amount < 0.005: trade_amount = 0.005
-
             recent_blockhash = await self.client.get_latest_blockhash()
-            
-            # Add Priority Fee to the transaction
             ix_priority = set_compute_unit_price(self.priority_fee)
             ix_transfer = transfer(TransferParams(
                 from_pubkey=self.keypair.pubkey(),
                 to_pubkey=self.keypair.pubkey(),
                 lamports=int(0.000005 * 1e9)
             ))
-            
-            tx = Transaction.new_signed_with_payer(
-                [ix_priority, ix_transfer], 
-                self.keypair.pubkey(), 
-                [self.keypair], 
-                recent_blockhash.value.blockhash
-            )
+            tx = Transaction.new_signed_with_payer([ix_priority, ix_transfer], self.keypair.pubkey(), [self.keypair], recent_blockhash.value.blockhash)
             await self.client.send_transaction(tx)
             
-            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {trade_amount:.3f} SOL")
+            # Restore Detailed History Format
+            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {trade_amount:.3f} SOL @ ${price:.4f}")
             return True
         except: return False
 
@@ -115,7 +103,7 @@ async def scalping_loop(chat_id, bot):
     pairs = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
     agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs}
     
-    await bot.send_message(chat_id, "📡 **Sniper Radar Online**\nTargeting 1.2% Gains (Priority Enabled)", reply_markup=main_menu_keyboard())
+    await bot.send_message(chat_id, "📡 **Sniper Radar Online**\nTargeting 1.2% (Wait: 3min + 1min Recovery)", reply_markup=main_menu_keyboard())
 
     while agent.is_running:
         if not agent.active_pair:
@@ -127,9 +115,11 @@ async def scalping_loop(chat_id, bot):
                 data["last"] = price
 
                 if data["drops"] >= 4:
-                    if await agent.execute_trade_action("BUY", p, price):
-                        agent.active_pair, agent.position, agent.buy_time = p, price, datetime.now()
-                        await bot.send_message(chat_id, f"🎯 **ENTRY: {p}**\nPrice: `${price:.4f}`", reply_markup=main_menu_keyboard())
+                    current_bal = await agent.get_balance()
+                    trade_amt = current_bal * 0.10
+                    if await agent.execute_trade_action("BUY", p, price, trade_amt):
+                        agent.active_pair, agent.position, agent.buy_time, agent.current_trade_amt = p, price, datetime.now(), trade_amt
+                        await bot.send_message(chat_id, f"🎯 **ENTRY: {p}**\nBought `${price:.4f}`. Window 1 starts.", reply_markup=main_menu_keyboard())
                         break
             await asyncio.sleep(2)
         else:
@@ -137,14 +127,24 @@ async def scalping_loop(chat_id, bot):
             elapsed = (datetime.now() - agent.buy_time).total_seconds()
             profit = (curr_price - agent.position) / agent.position
 
-            if profit >= agent.fee_buffer_pct:
-                await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
-                await bot.send_message(chat_id, f"✅ **Profit Locked!** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
-                agent.active_pair = None
-            elif elapsed >= 60:
-                await agent.execute_trade_action("SELL (Time)", agent.active_pair, curr_price)
-                await bot.send_message(chat_id, f"🛑 **60s Cycle End**\nResult: `{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
-                agent.active_pair = None
+            # WINDOW 1: 0 - 3 Minutes (180s) -> Target 1.2%
+            if elapsed <= 180:
+                if profit >= agent.fee_buffer_pct:
+                    await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price, agent.current_trade_amt)
+                    await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
+                    agent.active_pair = None
+            
+            # WINDOW 2: 3 - 4 Minutes (180s - 240s) -> Sell if Green
+            elif 180 < elapsed <= 240:
+                if curr_price > agent.position:
+                    await agent.execute_trade_action("SELL (Recovery)", agent.active_pair, curr_price, agent.current_trade_amt)
+                    await bot.send_message(chat_id, f"🩹 **Recovery Exit:** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
+                    agent.active_pair = None
+                elif elapsed >= 239: # Final Cutoff
+                    await agent.execute_trade_action("SELL (Time)", agent.active_pair, curr_price, agent.current_trade_amt)
+                    await bot.send_message(chat_id, f"🛑 **4-Min Limit:** Closed at `{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
+                    agent.active_pair = None
+            
             await asyncio.sleep(1)
 
 class AgentManager:
@@ -175,7 +175,7 @@ async def button_handler(update, context):
         await q.message.reply_text(f"💼 **Balance:** `{bal} SOL`", reply_markup=main_menu_keyboard())
     elif q.data == "history":
         h = "\n".join(agent.history[-5:]) if agent.history else "Empty."
-        await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
+        await q.message.reply_text(f"📜 **Last 5 Trades:**\n{h}", reply_markup=main_menu_keyboard())
 
 async def main():
     webapp = web.Application()
@@ -195,4 +195,4 @@ if __name__ == "__main__":
     loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
     try: loop.run_until_complete(main())
     except Exception as e: print(f"Crash: {e}")
-            
+    
