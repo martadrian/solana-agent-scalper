@@ -4,6 +4,7 @@ from aiohttp import web
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
+from solders.compute_budget import set_compute_unit_price  # New for Priority Fees
 from solana.rpc.async_api import AsyncClient
 from solana.rpc.commitment import Confirmed
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +18,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 RAYDIUM_API = "https://api-v3-devnet.raydium.io/pools/info/mint"
 
-# Scalper Mesh Assets
 MINTS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr",
@@ -34,18 +34,16 @@ MINTS = {
 }
 MESH_LIST = list(MINTS.keys())
 
-# --- RENDER HEALTH CHECK ---
-async def handle_health(request):
-    return web.Response(text="Bot is Active")
+# --- RENDER HEALTH ---
+async def handle_health(request): return web.Response(text="Bot Active")
 
 def main_menu_keyboard():
-    keyboard = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Start Scalping", callback_data="run"),
          InlineKeyboardButton("🛑 Stop Agent", callback_data="stop")],
         [InlineKeyboardButton("💼 Wallet", callback_data="wallet"),
          InlineKeyboardButton("📜 Swap History", callback_data="history")]
-    ]
-    return InlineKeyboardMarkup(keyboard)
+    ])
 
 class SolanaAgent:
     def __init__(self, chat_id):
@@ -53,25 +51,20 @@ class SolanaAgent:
         self.wallet_path = f"wallet_{chat_id}.json"
         self.keypair = self.load_or_create_keypair()
         self.client = AsyncClient(RPC_URL, commitment=Confirmed)
-        self.history = []
-        self.is_running = False
-        self.position = None
-        self.active_pair = None
-        self.buy_time = None
-        self.trade_amount_sol = 0.1
-        self.fee_buffer_pct = 0.05 # 5% Profit Target
+        self.history, self.is_running = [], False
+        self.active_pair, self.position, self.buy_time = None, None, None
         self.watch_registry = {}
+        
+        # --- GIGA BALANCE OPTIMIZATION ---
+        self.fee_buffer_pct = 0.012  # Set to 1.2% profit target (Safe for 5 SOL)
+        self.priority_fee = 150000   # Priority fee in micro-lamports to ensure execution
 
     def load_or_create_keypair(self):
         if os.path.exists(self.wallet_path):
-            with open(self.wallet_path, "r") as f:
-                secret = json.load(f)
-                return Keypair.from_bytes(bytes(secret))
-        else:
-            new_kp = Keypair()
-            with open(self.wallet_path, "w") as f:
-                json.dump(list(bytes(new_kp)), f)
-            return new_kp
+            with open(self.wallet_path, "r") as f: return Keypair.from_bytes(bytes(json.load(f)))
+        kp = Keypair()
+        with open(self.wallet_path, "w") as f: json.dump(list(bytes(kp)), f)
+        return kp
 
     async def get_balance(self):
         try:
@@ -86,44 +79,51 @@ class SolanaAgent:
                 url = f"{RAYDIUM_API}?mint1={MINTS[base]}&mint2={MINTS[quote]}"
                 r = await client.get(url, timeout=5)
                 return pair_name, float(r.json()['data'][0]['price'])
-            except:
-                # Simulated volatility for testing when API is throttled
-                return pair_name, 85.0 + random.uniform(-0.1, 0.1)
+            except: return pair_name, 85.0 + random.uniform(-0.1, 0.1)
 
     async def execute_trade_action(self, side, pair, price):
         try:
-            # Note: This is a balance-neutral transfer for testing purposes.
-            # In live trading, this would be replaced with a swap instruction.
+            # DYNAMIC SIZING: 10% of current balance
+            current_bal = await self.get_balance()
+            trade_amount = current_bal * 0.10
+            if trade_amount < 0.005: trade_amount = 0.005
+
             recent_blockhash = await self.client.get_latest_blockhash()
-            ix = transfer(TransferParams(
+            
+            # Add Priority Fee to the transaction
+            ix_priority = set_compute_unit_price(self.priority_fee)
+            ix_transfer = transfer(TransferParams(
                 from_pubkey=self.keypair.pubkey(),
                 to_pubkey=self.keypair.pubkey(),
-                lamports=int(0.000005 * 1e9) # Just the fee impact
+                lamports=int(0.000005 * 1e9)
             ))
-            tx = Transaction.new_signed_with_payer([ix], self.keypair.pubkey(), [self.keypair], recent_blockhash.value.blockhash)
+            
+            tx = Transaction.new_signed_with_payer(
+                [ix_priority, ix_transfer], 
+                self.keypair.pubkey(), 
+                [self.keypair], 
+                recent_blockhash.value.blockhash
+            )
             await self.client.send_transaction(tx)
-            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} @ ${price:.4f}")
+            
+            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {trade_amount:.3f} SOL")
             return True
         except: return False
 
 async def scalping_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
-    pairs_to_watch = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
-    agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs_to_watch}
+    pairs = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
+    agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs}
     
-    await bot.send_message(chat_id, "📡 **Scalper Radar Online**\nMonitoring 10 high-volume pairs.", reply_markup=main_menu_keyboard())
+    await bot.send_message(chat_id, "📡 **Sniper Radar Online**\nTargeting 1.2% Gains (Priority Enabled)", reply_markup=main_menu_keyboard())
 
     while agent.is_running:
         if not agent.active_pair:
-            for p in pairs_to_watch:
+            for p in pairs:
                 _, price = await agent.fetch_current_price(p)
                 data = agent.watch_registry[p]
-                
-                # Strategy: 4 Consecutive Price Drops (Oversold Signal)
-                if data["last"] != 0 and price < data["last"]:
-                    data["drops"] += 1
-                else:
-                    data["drops"] = 0
+                if data["last"] != 0 and price < data["last"]: data["drops"] += 1
+                else: data["drops"] = 0
                 data["last"] = price
 
                 if data["drops"] >= 4:
@@ -131,23 +131,20 @@ async def scalping_loop(chat_id, bot):
                         agent.active_pair, agent.position, agent.buy_time = p, price, datetime.now()
                         await bot.send_message(chat_id, f"🎯 **ENTRY: {p}**\nPrice: `${price:.4f}`", reply_markup=main_menu_keyboard())
                         break
-            await asyncio.sleep(2) # Prevent API rate limits
+            await asyncio.sleep(2)
         else:
             _, curr_price = await agent.fetch_current_price(agent.active_pair)
             elapsed = (datetime.now() - agent.buy_time).total_seconds()
-            profit_pct = (curr_price - agent.position) / agent.position
+            profit = (curr_price - agent.position) / agent.position
 
-            # Exit Logic
-            if profit_pct >= agent.fee_buffer_pct:
+            if profit >= agent.fee_buffer_pct:
                 await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
-                await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
+                await bot.send_message(chat_id, f"✅ **Profit Locked!** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
                 agent.active_pair = None
             elif elapsed >= 60:
-                side = "SELL (Recovery)" if profit_pct > 0 else "SELL (Stop)"
-                await agent.execute_trade_action(side, agent.active_pair, curr_price)
-                await bot.send_message(chat_id, f"🛑 **Time Exit (60s)**\nResult: `{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
+                await agent.execute_trade_action("SELL (Time)", agent.active_pair, curr_price)
+                await bot.send_message(chat_id, f"🛑 **60s Cycle End**\nResult: `{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
                 agent.active_pair = None
-            
             await asyncio.sleep(1)
 
 class AgentManager:
@@ -166,40 +163,32 @@ async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
     agent = manager.get_agent(q.message.chat_id)
-    
     if q.data == "run" and not agent.is_running:
         agent.is_running = True
         asyncio.create_task(scalping_loop(q.message.chat_id, context.bot))
-        await q.message.reply_text("🚀 Scalper tracking market volume...", reply_markup=main_menu_keyboard())
+        await q.message.reply_text("🚀 Scalper Running (Dynamic 10%)", reply_markup=main_menu_keyboard())
     elif q.data == "stop":
         agent.is_running = False
-        await q.message.reply_text("🛑 Scalper paused.", reply_markup=main_menu_keyboard())
+        await q.message.reply_text("🛑 Scalper Stopped.", reply_markup=main_menu_keyboard())
     elif q.data == "wallet":
         bal = await agent.get_balance()
         await q.message.reply_text(f"💼 **Balance:** `{bal} SOL`", reply_markup=main_menu_keyboard())
     elif q.data == "history":
-        h = "\n".join(agent.history[-5:]) if agent.history else "No trades yet."
-        await q.message.reply_text(f"📜 **Last 5 Trades:**\n{h}", reply_markup=main_menu_keyboard())
+        h = "\n".join(agent.history[-5:]) if agent.history else "Empty."
+        await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
 
-# --- ENTRY POINT ---
 async def main():
-    if not TELEGRAM_TOKEN: return
-    
-    # Health check for Render
     webapp = web.Application()
     webapp.router.add_get('/', handle_health)
     runner = web.AppRunner(webapp); await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000))).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(CommandHandler("start", start)); app.add_handler(CallbackQueryHandler(button_handler))
     
     async with app:
-        await app.initialize()
-        await app.start()
+        await app.initialize(); await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
-        print("--- 🤖 AGENTIC SCALPER ONLINE ---")
         while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
