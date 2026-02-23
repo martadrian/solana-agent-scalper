@@ -1,6 +1,6 @@
 import os, asyncio, httpx, random, nest_asyncio, logging, collections, json
 from datetime import datetime
-from aiohttp import web  # Ensure this is in requirements.txt
+from aiohttp import web 
 from solders.keypair import Keypair
 from solders.transaction import Transaction
 from solders.system_program import TransferParams, transfer
@@ -17,7 +17,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 RAYDIUM_API = "https://api-v3-devnet.raydium.io/pools/info/mint"
 
-# Tokens and Mint Addresses for the Scalper Mesh
+# Scalper Mesh Assets
 MINTS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr",
@@ -55,13 +55,11 @@ class SolanaAgent:
         self.client = AsyncClient(RPC_URL, commitment=Confirmed)
         self.history = []
         self.is_running = False
-        self.task = None
         self.position = None
         self.active_pair = None
         self.buy_time = None
         self.trade_amount_sol = 0.1
-        # UPDATE: Set to 5% to ensure net profit after slippage and SOL fees
-        self.fee_buffer_pct = 0.05 
+        self.fee_buffer_pct = 0.05 # 5% Profit Target
         self.watch_registry = {}
 
     def load_or_create_keypair(self):
@@ -89,72 +87,67 @@ class SolanaAgent:
                 r = await client.get(url, timeout=5)
                 return pair_name, float(r.json()['data'][0]['price'])
             except:
-                return pair_name, 85.0 + random.uniform(-0.05, 0.05)
+                # Simulated volatility for testing when API is throttled
+                return pair_name, 85.0 + random.uniform(-0.1, 0.1)
 
     async def execute_trade_action(self, side, pair, price):
         try:
-            sol_to_move = self.trade_amount_sol
+            # Note: This is a balance-neutral transfer for testing purposes.
+            # In live trading, this would be replaced with a swap instruction.
             recent_blockhash = await self.client.get_latest_blockhash()
             ix = transfer(TransferParams(
                 from_pubkey=self.keypair.pubkey(),
                 to_pubkey=self.keypair.pubkey(),
-                lamports=int(sol_to_move * 1e9)
+                lamports=int(0.000005 * 1e9) # Just the fee impact
             ))
             tx = Transaction.new_signed_with_payer([ix], self.keypair.pubkey(), [self.keypair], recent_blockhash.value.blockhash)
-            res = await self.client.send_transaction(tx)
-            sig = str(res.value)[:10]
-            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {sol_to_move} SOL @ ${price:.4f}")
-            return sig, sol_to_move
-        except: return None, 0
+            await self.client.send_transaction(tx)
+            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} @ ${price:.4f}")
+            return True
+        except: return False
 
 async def scalping_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     pairs_to_watch = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
     agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs_to_watch}
-    await bot.send_message(chat_id, "📡 **Agent Wallet Persistent**\nRadar active on 10 pairs.", reply_markup=main_menu_keyboard())
+    
+    await bot.send_message(chat_id, "📡 **Scalper Radar Online**\nMonitoring 10 high-volume pairs.", reply_markup=main_menu_keyboard())
+
     while agent.is_running:
         if not agent.active_pair:
-            tasks = [agent.fetch_current_price(p) for p in pairs_to_watch]
-            results = await asyncio.gather(*tasks)
-            for pair, price in results:
-                data = agent.watch_registry[pair]
+            for p in pairs_to_watch:
+                _, price = await agent.fetch_current_price(p)
+                data = agent.watch_registry[p]
+                
+                # Strategy: 4 Consecutive Price Drops (Oversold Signal)
                 if data["last"] != 0 and price < data["last"]:
                     data["drops"] += 1
-                else: data["drops"] = 0
+                else:
+                    data["drops"] = 0
                 data["last"] = price
+
                 if data["drops"] >= 4:
-                    sig, amt = await agent.execute_trade_action("BUY", pair, price)
-                    if sig:
-                        agent.active_pair = pair
-                        agent.position = price
-                        agent.buy_time = datetime.now()
-                        await bot.send_message(chat_id, f"🎯 **ENTRY: {pair}**\nBought `${price:.4f}`. Window 1 starts.", reply_markup=main_menu_keyboard())
+                    if await agent.execute_trade_action("BUY", p, price):
+                        agent.active_pair, agent.position, agent.buy_time = p, price, datetime.now()
+                        await bot.send_message(chat_id, f"🎯 **ENTRY: {p}**\nPrice: `${price:.4f}`", reply_markup=main_menu_keyboard())
                         break
-            await asyncio.sleep(1)
+            await asyncio.sleep(2) # Prevent API rate limits
         else:
             _, curr_price = await agent.fetch_current_price(agent.active_pair)
             elapsed = (datetime.now() - agent.buy_time).total_seconds()
             profit_pct = (curr_price - agent.position) / agent.position
-            if elapsed <= 30:
-                if profit_pct >= agent.fee_buffer_pct:
-                    await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
-                    agent.active_pair = None
-                elif elapsed >= 29 and profit_pct > 0:
-                    await agent.execute_trade_action("SELL (30s Profit)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "💰 **30s Exit:** Locked in profit.", reply_markup=main_menu_keyboard())
-                    agent.active_pair = None
-            elif 30 < elapsed <= 60:
-                if curr_price > agent.position:
-                    await agent.execute_trade_action("SELL (Recovery)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "🩹 **Recovery:** Sold at green.", reply_markup=main_menu_keyboard())
-                    agent.active_pair = None
-                elif elapsed >= 59:
-                    await agent.execute_trade_action("SELL (Time Limit)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "🛑 **60s Limit:** Force closed position.", reply_markup=main_menu_keyboard())
-                    agent.active_pair = None
-            if agent.active_pair:
-                agent.watch_registry[agent.active_pair]["last"] = curr_price
+
+            # Exit Logic
+            if profit_pct >= agent.fee_buffer_pct:
+                await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
+                await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
+                agent.active_pair = None
+            elif elapsed >= 60:
+                side = "SELL (Recovery)" if profit_pct > 0 else "SELL (Stop)"
+                await agent.execute_trade_action(side, agent.active_pair, curr_price)
+                await bot.send_message(chat_id, f"🛑 **Time Exit (60s)**\nResult: `{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
+                agent.active_pair = None
+            
             await asyncio.sleep(1)
 
 class AgentManager:
@@ -167,67 +160,50 @@ manager = AgentManager()
 
 async def start(update, context):
     agent = manager.get_agent(update.effective_chat.id)
-    await update.message.reply_text(f"🤖 **Agentic Wallet Online**\nAddress: `{agent.keypair.pubkey()}`\nStatus: Persistent", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
+    await update.message.reply_text(f"🤖 **Agent Online**\nAddress: `{agent.keypair.pubkey()}`", reply_markup=main_menu_keyboard(), parse_mode="Markdown")
 
 async def button_handler(update, context):
     q = update.callback_query
     await q.answer()
     agent = manager.get_agent(q.message.chat_id)
+    
     if q.data == "run" and not agent.is_running:
         agent.is_running = True
-        agent.task = asyncio.create_task(scalping_loop(q.message.chat_id, context.bot))
-        await q.message.reply_text("✅ Scalper online.", reply_markup=main_menu_keyboard())
+        asyncio.create_task(scalping_loop(q.message.chat_id, context.bot))
+        await q.message.reply_text("🚀 Scalper tracking market volume...", reply_markup=main_menu_keyboard())
     elif q.data == "stop":
         agent.is_running = False
-        await q.message.reply_text("🛑 Scalper stopped.", reply_markup=main_menu_keyboard())
+        await q.message.reply_text("🛑 Scalper paused.", reply_markup=main_menu_keyboard())
     elif q.data == "wallet":
         bal = await agent.get_balance()
         await q.message.reply_text(f"💼 **Balance:** `{bal} SOL`", reply_markup=main_menu_keyboard())
     elif q.data == "history":
         h = "\n".join(agent.history[-5:]) if agent.history else "No trades yet."
-        await q.message.reply_text(f"📜 **History:**\n{h}", reply_markup=main_menu_keyboard())
+        await q.message.reply_text(f"📜 **Last 5 Trades:**\n{h}", reply_markup=main_menu_keyboard())
 
-# --- FINAL STABLE ENTRY POINT FOR RENDER ---
+# --- ENTRY POINT ---
 async def main():
-    if not TELEGRAM_TOKEN:
-        print("Error: TELEGRAM_TOKEN not set.")
-        return
-
+    if not TELEGRAM_TOKEN: return
+    
+    # Health check for Render
     webapp = web.Application()
     webapp.router.add_get('/', handle_health)
-    runner = web.AppRunner(webapp)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    await web.TCPSite(runner, '0.0.0.0', port).start()
-    print(f"📡 Health check server live on port {port}")
+    runner = web.AppRunner(webapp); await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000))).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     
-    await app.initialize()
-    await app.start()
-    
-    if app.updater:
+    async with app:
+        await app.initialize()
+        await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         print("--- 🤖 AGENTIC SCALPER ONLINE ---")
-    
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
-        print("Shutting down...")
-    finally:
-        if app.updater:
-            await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        while True: await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(main())
-    except Exception as e:
-        print(f"Main Loop Crash: {e}")
-                        
+    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
+    try: loop.run_until_complete(main())
+    except Exception as e: print(f"Crash: {e}")
+            
