@@ -1,84 +1,59 @@
-# 🤖 Solana Agentic Mesh Scalper
-**The Time-Windowed Autonomous Trading Agent**
+# 🤖 Solana Agentic Wallet Prototype
+**Autonomous Identity & High-Frequency Mesh Scalper**
 
-This repository features a fully autonomous, agentic wallet designed for the Solana Devnet. It doesn't just execute trades; it "guards" them using a sophisticated dual-window time strategy to ensure maximum capital efficiency and profit protection.
+This repository features a fully autonomous Agentic Wallet designed for the Solana ecosystem. Unlike traditional custodial or browser-based wallets, this system operates as an independent participant, capable of programmatic transaction signing, asset management, and complex protocol interaction without human intervention.
 
-## 🌟 Live Demo
-Experience the autonomous agent in action on Telegram:
-👉 **[@Aiagentscalperbot](https://t.me/Aiagentscalperbot)**
-
----
-
-## 🎮 Telegram Interface & Functionality
-The agent is managed entirely through an interactive Telegram menu. Once you send `/start`, the agent initializes your unique persistent wallet and presents the following dashboard:
-
-### 🛠️ Menu Buttons & Logic
-- **🚀 Start Scalping**: 
-  - *Internal Trigger:* `run`
-  - *Action:* Activates the autonomous "Mesh Hunter." The agent begins scanning the top 10 token pairs every second. It looks for 4 consecutive 1-second price drops to execute a high-probability entry.
-- **🛑 Stop Agent**: 
-  - *Action:* Gracefully terminates the hunting loop. If a trade is currently active, the agent will continue to manage the exit strategy before stopping to protect your capital.
-- **💼 Wallet**: 
-  - *Action:* On-chain query to display your live **Devnet SOL Balance** and your unique **Programmatic Public Key**.
-- **📜 Swap History**: 
-  - *Action:* Pulls the last 5 trades from the local history, showing the token pair, buy price, sell price, and the exact timestamp of execution.
+## 🚀 Core Capabilities
+* **Programmatic Identity**: Automatically generates and recovers cryptographic Keypairs using `solders`, ensuring a unique and persistent on-chain identity.
+* **Autonomous Signing Engine**: Signs and broadcasts transactions natively, enabling the agent to act on market opportunities in milliseconds.
+* **Giga-Balance Optimization**: Specifically tuned for capital efficiency with **5 SOL+** balances, utilizing dynamic priority fees to ensure execution during network congestion.
+* **Multi-Asset Management**: Native support for holding, tracking, and swapping between SOL and a broad mesh of SPL tokens (JUP, RAY, PYTH, etc.).
 
 ---
 
-## 🌟 Key Features
-- **Parallel Mesh Hunter**: Simultaneously monitors the top 10 SPL token pairs (SOL, JUP, RAY, etc.) for rapid momentum shifts.
-- **4s-Shift Detection**: Uses a high-frequency tracking registry to identify 4 consecutive 1-second price drops—a high-probability scalping entry.
-- **Agentic Decision Engine**: Independently manages the trade lifecycle without human oversight, adhering to strict time-based exit rules.
-- **Devnet Ready**: Pre-configured for seamless testing on Solana Devnet with standard RPC integrations.
+## 🧠 The "Profit Guardian" Strategy
+The agent employs a sophisticated dual-window temporal exit strategy to solve the "bag-holding" problem in volatile markets:
 
----
-
-## 🧠 Deep Dive: Wallet Design & Strategy
-
-### 1. Programmatic Wallet Design
-The agent utilizes the `solders` library to create and manage an on-chain identity. Unlike a standard browser wallet, this **Agentic Wallet**:
-* **Autonomous Generation**: Generates its own cryptographic Keypair programmatically upon initialization (`Keypair()`).
-* **Non-Interactive Signing**: Signs transactions automatically within the execution loop using the `solders.transaction.Transaction` class.
-* **Identity Persistence**: Saves the secret key locally in a `wallet_{chat_id}.json` file. This ensures your wallet address and funds remain consistent even if the server restarts.
-
-### 2. Security Considerations
-* **Non-Custodial Logic**: Private keys are generated and stored only within the execution environment and are never transmitted.
-* **Environment Isolation**: Uses `os.getenv` to keep sensitive credentials (like your Telegram Token) out of the source code.
-* **Risk Mitigation**: The 60-second hard exit prevents "bag holding" and protects the 0.1 SOL trade size from long-term downtrends.
-* **Fee Awareness**: The agent is programmed with a "Profit Margin Floor" (~0.002 SOL / 2.1%) to ensure transaction fees do not erode the principal.
-
-### 3. The "Profit Guardian" Strategy
-The agent follows a strict temporal logic to solve the "bag-holding" problem in volatile markets:
-
-| Phase | Duration | Exit Condition | Goal |
+| Phase | Window | Condition | Logic |
 | :--- | :--- | :--- | :--- |
-| **Hunting Phase** | Continuous | 4s Consecutive Price Drop | Find high-momentum entries. |
-| **Window 1** | 0 - 30s | Profit > 2.1% OR Price > Buy @ 30s | Secure quick gains & cover fees. |
-| **Window 2** | 30 - 60s | Price > Buy Price | Exit at the first second of profit. |
-| **Hard Exit** | 60s | Immediate Sell | Liquidate position to restart hunting. |
+| **Hunting** | Continuous | 4-Drop Shift | Scans top 50 volume pairs for 4 consecutive 1s price drops. |
+| **Window 1** | 0 - 180s | Target > 1.2% | Seeks a high-probability "Sniper" profit target. |
+| **Window 2** | 180 - 240s | Price > Entry | **Recovery Mode**: Exits at the first sign of green to protect principal. |
+| **Hard Exit** | 240s | Immediate | Full liquidation of position to reset the hunting cycle. |
 
 
 
 ---
 
-## 🛠️ Setup Instructions
+## 🛠️ Architecture & Setup
 
-### 1. Prerequisites
-- Python 3.10+
-- A Telegram Bot Token from [@BotFather](https://t.me/botfather)
-- A Solana Devnet RPC URL (Default: `https://api.devnet.solana.com`)
+### 1. Key Persistence & Disk Management
+For the agent to maintain its identity across sessions, it utilizes a local filesystem-based storage system. 
+* **Identity Restoration**: On boot, the agent scans for `wallet_{chat_id}.json`. If found, it restores the previous wallet; otherwise, it initializes a new one.
+* **Deployment Note**: When deploying to cloud environments like **Render**, attach a **Persistent Disk** to the root directory. This ensures the agent’s funds and identity survive service restarts or redeployments.
 
-### 2. Installation & Setup
-To get the agent running locally or on a server:
-
+### 2. Installation
 ```bash
 # Clone the repository
-git clone [https://github.com/YOUR_USERNAME/solana-agent-scalper.git](https://github.com/YOUR_USERNAME/solana-agent-scalper.git)
-cd solana-agent-scalper
+git clone [https://github.com/martadrian/solana-agent-wallet.git](https://github.com/martadrian/solana-agent-wallet.git)
+cd solana-agent-wallet
 
-# Install required Python dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# Create a .env file for your credentials (FOR LOCAL TESTING ONLY)
-echo "TELEGRAM_TOKEN=your_telegram_bot_token_here" > .env
-echo "RPC_URL=[https://api.devnet.solana.com](https://api.devnet.solana.com)" >> .env
+
+
+# Configure environment
+echo "TELEGRAM_TOKEN=your_token_here" > .env
+python bot.py
+
+**3. Telegram Interface**
+The agent is managed via an interactive dashboard:
+🚀 Start Scalping: Engages the autonomous mesh hunter using 10% of current balance per trade.
+🛑 Stop Agent: Gracefully terminates the loop after managing any active positions.
+💼 Wallet: Real-time on-chain query of SOL balance and programmatic public key.
+📜 Swap History: Detailed audit logs formatted as: Timestamp | Side | Pair | Amount SOL @ Price.
+🛡️ Security & Design Considerations
+Sandboxed Environment: Private keys are generated and stored locally within the execution environment and are never transmitted.
+Non-Interactive Execution: Built for headless environments where "Connect Wallet" prompts are impossible.
+Priority Fees: Implements set_compute_unit_price at 150,000 micro-lamports to ensure agent transactions are prioritized by the network.
