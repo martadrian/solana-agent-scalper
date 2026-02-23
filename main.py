@@ -60,7 +60,8 @@ class SolanaAgent:
         self.active_pair = None
         self.buy_time = None
         self.trade_amount_sol = 0.1
-        self.fee_buffer_pct = 0.021
+        # UPDATE: Set to 5% to ensure net profit after slippage and SOL fees
+        self.fee_buffer_pct = 0.05 
         self.watch_registry = {}
 
     def load_or_create_keypair(self):
@@ -110,7 +111,7 @@ async def scalping_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     pairs_to_watch = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
     agent.watch_registry = {p: {"last": 0, "drops": 0} for p in pairs_to_watch}
-    await bot.send_message(chat_id, "📡 **Agent Wallet Persistent**\nRadar active on 10 pairs.")
+    await bot.send_message(chat_id, "📡 **Agent Wallet Persistent**\nRadar active on 10 pairs.", reply_markup=main_menu_keyboard())
     while agent.is_running:
         if not agent.active_pair:
             tasks = [agent.fetch_current_price(p) for p in pairs_to_watch]
@@ -127,7 +128,7 @@ async def scalping_loop(chat_id, bot):
                         agent.active_pair = pair
                         agent.position = price
                         agent.buy_time = datetime.now()
-                        await bot.send_message(chat_id, f"🎯 **ENTRY: {pair}**\nBought `${price:.4f}`. Window 1 starts.")
+                        await bot.send_message(chat_id, f"🎯 **ENTRY: {pair}**\nBought `${price:.4f}`. Window 1 starts.", reply_markup=main_menu_keyboard())
                         break
             await asyncio.sleep(1)
         else:
@@ -137,20 +138,20 @@ async def scalping_loop(chat_id, bot):
             if elapsed <= 30:
                 if profit_pct >= agent.fee_buffer_pct:
                     await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit_pct*100:.2f}%`")
+                    await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit_pct*100:.2f}%`", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
                 elif elapsed >= 29 and profit_pct > 0:
                     await agent.execute_trade_action("SELL (30s Profit)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "💰 **30s Exit:** Locked in profit.")
+                    await bot.send_message(chat_id, "💰 **30s Exit:** Locked in profit.", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
             elif 30 < elapsed <= 60:
                 if curr_price > agent.position:
                     await agent.execute_trade_action("SELL (Recovery)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "🩹 **Recovery:** Sold at green.")
+                    await bot.send_message(chat_id, "🩹 **Recovery:** Sold at green.", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
                 elif elapsed >= 59:
                     await agent.execute_trade_action("SELL (Time Limit)", agent.active_pair, curr_price)
-                    await bot.send_message(chat_id, "🛑 **60s Limit:** Force closed position.")
+                    await bot.send_message(chat_id, "🛑 **60s Limit:** Force closed position.", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
             if agent.active_pair:
                 agent.watch_registry[agent.active_pair]["last"] = curr_price
@@ -192,7 +193,6 @@ async def main():
         print("Error: TELEGRAM_TOKEN not set.")
         return
 
-    # 1. Start Health Server (Port 10000)
     webapp = web.Application()
     webapp.router.add_get('/', handle_health)
     runner = web.AppRunner(webapp)
@@ -201,7 +201,6 @@ async def main():
     await web.TCPSite(runner, '0.0.0.0', port).start()
     print(f"📡 Health check server live on port {port}")
 
-    # 2. Initialize Telegram Application manually to avoid Weak Reference bug
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
@@ -213,7 +212,6 @@ async def main():
         await app.updater.start_polling(drop_pending_updates=True)
         print("--- 🤖 AGENTIC SCALPER ONLINE ---")
     
-    # 3. Keep the loop alive manually
     try:
         while True:
             await asyncio.sleep(3600)
@@ -226,12 +224,10 @@ async def main():
         await app.shutdown()
 
 if __name__ == "__main__":
-    # Create and set a fresh event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(main())
     except Exception as e:
         print(f"Main Loop Crash: {e}")
-                
-            
+                        
