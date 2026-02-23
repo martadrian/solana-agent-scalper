@@ -1,35 +1,35 @@
 ---
-name: solana-scalper
-description: Autonomous Solana trading agent with persistent JSON wallet identity and 60-second time-decay exit logic.
-version: 1.1.0
+name: solana-agent-wallet
+description: Autonomous Agentic Wallet with 4-minute temporal exit logic, dynamic 10% trade sizing, and priority fee execution.
+version: 1.2.0
 ---
 
-# Solana Scalper Skill
+# Solana Agentic Wallet Skill
 
 ## Overview
-This skill provides an autonomous decision engine for high-frequency scalping on Solana Devnet. It utilizes a persistent programmatic wallet identity and manages trade lifecycles through precise temporal windows.
+This skill defines an autonomous participant for the Solana ecosystem. It is capable of independent market analysis, programmatic transaction signing, and sophisticated liquidity management using a time-decay exit strategy optimized for Devnet assets.
 
 ## Capabilities
-- **Persistent Wallet Management**: Automatically creates or recovers a unique Solana identity via `wallet_{chat_id}.json`.
-- **Parallel Mesh Hunter**: Simultaneously monitors 10+ SPL token pairs (SOL, JUP, RAY, etc.) via Raydium V3 APIs.
-- **4s-Shift Entry**: Triggers buy orders autonomously after detecting 4 consecutive 1-second price decreases.
-- **Dual-Window Profit Guardian**:
-    - **Window 1 (0-30s)**: Aggressive profit taking to cover 0.002 SOL network fees (Trigger: >2.1% gain).
-    - **Window 2 (30-60s)**: Recovery mode to exit at the first sign of green (Break-even).
-    - **Hard Exit (60s)**: Immediate liquidation to preserve capital.
-- **Agentic Transaction Signing**: Native use of `solders` and `solana-py` for non-interactive transaction signing.
+- **Persistent Programmatic Identity**: Automatically initializes or restores a unique Solana Keypair via local disk storage (`wallet_{chat_id}.json`).
+- **Autonomous Mesh Hunter**: Monitors high-volume token pairs (SOL, JUP, RAY, PYTH, etc.) using high-frequency price polling.
+- **Dynamic Unit Economics**: Automatically calculates trade size as 10% of total wallet balance to enable compound growth.
+- **Priority Execution Engine**: Implements `set_compute_unit_price` at 150,000 micro-lamports to ensure agent transactions bypass network congestion.
+- **4-Minute Profit Guardian**:
+    - **Sniper Window (0-180s)**: Targets a 1.2% net profit to capitalize on momentum.
+    - **Recovery Window (180-240s)**: Exits immediately upon any price movement above the entry point.
+    - **Liquidate Window (240s)**: Force-closes positions to free up capital for new opportunities.
 
-## Interaction & Commands
-The agent is controlled via a Telegram interface using the following triggers:
-- `/start`: Initializes the agentic environment and loads/creates the persistent wallet.
-- `run` (Callback): Activates the autonomous parallel hunting and scalping loop.
-- `stop` (Callback): Safely terminates the active hunting task.
-- `wallet` (Callback): Provides live on-chain SOL balance and the public address.
-- `history` (Callback): Displays the most recent trade executions and entry/exit prices.
+## Interaction & Dashboard Triggers
+The agent exposes the following autonomous functions via a persistent Telegram interface:
+- `/start`: Provisions the agentic environment and verifies identity persistence.
+- `run`: Activates the high-frequency scanning and auto-signing loop.
+- `stop`: Deactivates hunting while maintaining management of open positions.
+- `wallet`: Real-time query of programmatic address and SOL holdings.
+- `history`: Provides detailed trade logs: `Time | Side | Pair | Amount @ Price`.
 
 ## Technical Specifications
 - **Network**: Solana Devnet (`api.devnet.solana.com`)
-- **Protocol**: Raydium API + Solana System Program (Transfers)
-- **Programming Language**: Python 3.10+
-- **Security**: Environment-isolated credentials and local-only private key storage.
+- **Execution Environment**: Python 3.10+ / `solders` / `solana-py`
+- **Protocol Integration**: Raydium V3 Price APIs & Solana System Program
+- **Identity Security**: Non-custodial, local-only secret key storage with disk persistence support.
 - 
