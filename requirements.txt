@@ -1,8 +1,7 @@
-python-telegram-bot
-httpx
-solana
-solders
+python-telegram-bot>=20.0
+httpx>=0.25
+solana>=0.26
+solders>=0.23
 nest_asyncio
 python-dotenv
-aiohttp
-requests
+aiohttp>=3.8
