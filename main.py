@@ -1,4 +1,4 @@
-import os, asyncio, httpx, random, nest_asyncio, logging, collections, json
+import os, asyncio, httpx, random, nest_asyncio, logging, json
 from datetime import datetime
 from aiohttp import web 
 from solders.keypair import Keypair
@@ -18,23 +18,20 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 RAYDIUM_API = "https://api-v3-devnet.raydium.io/pools/info/mint"
 
+# Jupiter endpoints
+JUPITER_QUOTE = "https://quote-api.jup.ag/v6/quote"
+JUPITER_SWAP = "https://quote-api.jup.ag/v6/swap"
+
 MINTS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr",
     "RAY": "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
     "JUP": "Ab79GvS95S3wMvDzhD3jS9m3pG3bXvX5X5X5X5X5X5",
     "BONK": "DezXAZ8z7PnrnAnqSbwvW6EmyJvKz3H69fM65D8xG18Q",
-    "PYTH": "EHm6pM8B12NAtn2UvCscRsc5F9S5X5X5X5X5X5X5X5",
-    "KMNO": "Kmno1234567890abcdefghijklmnopqrstuvwxyz",
-    "DRIFT": "DriFt1234567890abcdefghijklmnopqrstuvwxyz",
-    "mSOL": "mSoLzYCxHdYgS66cGof7n7mS8Y544SSfXk67Ysh5K8",
-    "jitoSOL": "J1toso1uayqc79fmQYbs9LNJ4sUK2V6p5shK26Kdf2Xd",
-    "HNT": "hntyVP6BskS0azuYv0u6WVf6A7B2X5X5X5X5X5X5X5X",
-    "RENDER": "rndr9szSra8f5SscRsc5F9S5X5X5X5X5X5X5X5X5X5X"
 }
 MESH_LIST = list(MINTS.keys())
 
-# --- RENDER HEALTH ---
+# --- HEALTH ---
 async def handle_health(request): return web.Response(text="Bot Active")
 
 def main_menu_keyboard():
@@ -45,6 +42,7 @@ def main_menu_keyboard():
          InlineKeyboardButton("📜 Swap History", callback_data="history")]
     ])
 
+# ================= AGENT =================
 class SolanaAgent:
     def __init__(self, chat_id):
         self.chat_id = chat_id
@@ -55,15 +53,16 @@ class SolanaAgent:
         self.active_pair, self.position, self.buy_time = None, None, None
         self.current_trade_amt = 0
         self.watch_registry = {}
-        
-        self.fee_buffer_pct = 0.012  # 1.2% profit target
-        self.priority_fee = 150000 
+        self.fee_buffer_pct = 0.012
+        self.priority_fee = 150000
 
     def load_or_create_keypair(self):
         if os.path.exists(self.wallet_path):
-            with open(self.wallet_path, "r") as f: return Keypair.from_bytes(bytes(json.load(f)))
+            with open(self.wallet_path, "r") as f: 
+                return Keypair.from_bytes(bytes(json.load(f)))
         kp = Keypair()
-        with open(self.wallet_path, "w") as f: json.dump(list(bytes(kp)), f)
+        with open(self.wallet_path, "w") as f: 
+            json.dump(list(bytes(kp)), f)
         return kp
 
     async def get_balance(self):
@@ -81,23 +80,56 @@ class SolanaAgent:
                 return pair_name, float(r.json()['data'][0]['price'])
             except: return pair_name, 85.0 + random.uniform(-0.1, 0.1)
 
+    # ---------- EXECUTE TRADE (JUPITER SWAP) ----------
     async def execute_trade_action(self, side, pair, price, trade_amount):
         try:
-            recent_blockhash = await self.client.get_latest_blockhash()
-            ix_priority = set_compute_unit_price(self.priority_fee)
-            ix_transfer = transfer(TransferParams(
-                from_pubkey=self.keypair.pubkey(),
-                to_pubkey=self.keypair.pubkey(),
-                lamports=int(0.000005 * 1e9)
-            ))
-            tx = Transaction.new_signed_with_payer([ix_priority, ix_transfer], self.keypair.pubkey(), [self.keypair], recent_blockhash.value.blockhash)
-            await self.client.send_transaction(tx)
-            
-            # Restore Detailed History Format
-            self.history.append(f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {trade_amount:.3f} SOL @ ${price:.4f}")
-            return True
-        except: return False
+            base, quote = pair.split("/")
+            input_mint = MINTS["SOL"] if side.startswith("BUY") else MINTS[base]
+            output_mint = MINTS[base] if side.startswith("BUY") else MINTS["SOL"]
+            amount_lamports = int(trade_amount * 1e9)
 
+            async with httpx.AsyncClient(timeout=20) as client:
+                # 1️⃣ Get quote
+                quote_res = await client.get(JUPITER_QUOTE, params={
+                    "inputMint": input_mint,
+                    "outputMint": output_mint,
+                    "amount": amount_lamports,
+                    "slippageBps": 50,
+                    "onlyDirectRoutes": False,
+                    "asLegacyTransaction": True
+                })
+                route = quote_res.json()["data"][0]
+
+                # 2️⃣ Build swap tx
+                swap_res = await client.post(JUPITER_SWAP, json={
+                    "route": route,
+                    "userPublicKey": str(self.keypair.pubkey()),
+                    "wrapUnwrapSOL": True,
+                    "dynamicComputeUnitLimit": True,
+                    "prioritizationFeeLamports": self.priority_fee
+                })
+
+                swap_tx = swap_res.json()["swapTransaction"]
+
+            # 3️⃣ Deserialize & sign
+            tx = Transaction.from_bytes(bytes.fromhex(swap_tx))
+            tx.sign([self.keypair])
+
+            # 4️⃣ Send
+            sig = await self.client.send_transaction(tx)
+            logging.info(f"Swap TX: {sig}")
+
+            # 5️⃣ Log history
+            self.history.append(
+                f"{datetime.now().strftime('%H:%M')} | {side} {pair} | {trade_amount:.3f} SOL @ ${price:.4f}"
+            )
+            return True
+
+        except Exception as e:
+            logging.error(f"Swap error: {e}")
+            return False
+
+# ================= LOOP =================
 async def scalping_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     pairs = [f"{m}/USDC" for m in MESH_LIST if m != "USDC"][:10]
@@ -127,26 +159,24 @@ async def scalping_loop(chat_id, bot):
             elapsed = (datetime.now() - agent.buy_time).total_seconds()
             profit = (curr_price - agent.position) / agent.position
 
-            # WINDOW 1: 0 - 3 Minutes (180s) -> Target 1.2%
             if elapsed <= 180:
                 if profit >= agent.fee_buffer_pct:
                     await agent.execute_trade_action("SELL (TP)", agent.active_pair, curr_price, agent.current_trade_amt)
                     await bot.send_message(chat_id, f"✅ **Target Hit!** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
-            
-            # WINDOW 2: 3 - 4 Minutes (180s - 240s) -> Sell if Green
             elif 180 < elapsed <= 240:
                 if curr_price > agent.position:
                     await agent.execute_trade_action("SELL (Recovery)", agent.active_pair, curr_price, agent.current_trade_amt)
                     await bot.send_message(chat_id, f"🩹 **Recovery Exit:** Gain: `+{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
-                elif elapsed >= 239: # Final Cutoff
+                elif elapsed >= 239:
                     await agent.execute_trade_action("SELL (Time)", agent.active_pair, curr_price, agent.current_trade_amt)
                     await bot.send_message(chat_id, f"🛑 **4-Min Limit:** Closed at `{profit*100:.2f}%`", reply_markup=main_menu_keyboard())
                     agent.active_pair = None
             
             await asyncio.sleep(1)
 
+# ================= MANAGER =================
 class AgentManager:
     def __init__(self): self.users = {}
     def get_agent(self, chat_id):
@@ -177,6 +207,7 @@ async def button_handler(update, context):
         h = "\n".join(agent.history[-5:]) if agent.history else "Empty."
         await q.message.reply_text(f"📜 **Last 5 Trades:**\n{h}", reply_markup=main_menu_keyboard())
 
+# ================= MAIN =================
 async def main():
     webapp = web.Application()
     webapp.router.add_get('/', handle_health)
