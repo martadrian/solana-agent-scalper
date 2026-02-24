@@ -10,6 +10,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandle
 from openai import OpenAI
 
 # ================= CONFIG =================
+
 nest_asyncio.apply()
 logging.basicConfig(level=logging.INFO)
 
@@ -34,6 +35,7 @@ MODEL_LIST = ["meta-llama/llama-3.3-70b-instruct:free", "openrouter/auto"]
 or_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
 
 # ================= UI =================
+
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Start Agent", callback_data="run"),
@@ -43,6 +45,7 @@ def main_menu_keyboard():
     ])
 
 # ================= AGENT =================
+
 class SolanaAgent:
     def __init__(self, chat_id):
         self.chat_id = chat_id
@@ -141,19 +144,35 @@ class SolanaAgent:
                 sig = await self.execute_actual_swap("SELL", pos["pair"].split("/")[0], pos["pair"].split("/")[1], pos["amount"])
                 if sig:
                     self.history.append(f"{datetime.now().strftime('%H:%M')} | TP SELL | {pos['pair']} | Tx: {sig[:8]}...")
-                    await bot.send_message(self.chat_id, f"✅ **TP Hit SELL** {pos['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`", parse_mode="Markdown")
+                    await bot.send_message(
+                        self.chat_id,
+                        f"✅ **TP Hit SELL** {pos['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`",
+                        parse_mode="Markdown",
+                        reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+                    )
                     self.active_positions.remove(pos)
             elif current_price <= pos["sl"]:
                 sig = await self.execute_actual_swap("SELL", pos["pair"].split("/")[0], pos["pair"].split("/")[1], pos["amount"])
                 if sig:
                     self.history.append(f"{datetime.now().strftime('%H:%M')} | SL SELL | {pos['pair']} | Tx: {sig[:8]}...")
-                    await bot.send_message(self.chat_id, f"❌ **SL Hit SELL** {pos['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`", parse_mode="Markdown")
+                    await bot.send_message(
+                        self.chat_id,
+                        f"❌ **SL Hit SELL** {pos['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`",
+                        parse_mode="Markdown",
+                        reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+                    )
                     self.active_positions.remove(pos)
 
 # ================= LOOP =================
+
 async def agent_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
-    await bot.send_message(chat_id, "🚀 **Live Agent Started**. Trading on DevNet...", parse_mode="Markdown")
+    await bot.send_message(
+        chat_id,
+        "🚀 Live Agent Started. Trading on DevNet...",
+        parse_mode="Markdown",
+        reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+    )
 
     while agent.is_running:
         snapshots = await agent.fetch_market_snapshots()
@@ -180,11 +199,17 @@ async def agent_loop(chat_id, bot):
                             "sl": snapshot["price"]*(1-sl_pct/100)
                         })
                         agent.history.append(f"{datetime.now().strftime('%H:%M')} | BUY | {snapshot['pair']} | Tx: {sig[:8]}...")
-                        await bot.send_message(chat_id, f"✅ **BUY executed** {snapshot['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`", parse_mode="Markdown")
+                        await bot.send_message(
+                            chat_id,
+                            f"✅ **BUY executed** {snapshot['pair']}\nTx: `https://solscan.io/tx/{sig}?cluster=devnet`",
+                            parse_mode="Markdown",
+                            reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+                        )
 
         await asyncio.sleep(30)
 
 # ================= MANAGER & TELEGRAM =================
+
 class AgentManager:
     def __init__(self): self.users = {}
     def get_agent(self, chat_id):
@@ -203,13 +228,24 @@ async def button_handler(update, context):
         asyncio.create_task(agent_loop(q.message.chat_id, context.bot))
     elif q.data=="stop":
         agent.is_running = False
-        await q.message.reply_text("🛑 Agent Stopped", reply_markup=main_menu_keyboard())
+        await q.message.reply_text(
+            "🛑 Agent Stopped",
+            reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+        )
     elif q.data=="wallet":
         bal = await agent.get_balance()
-        await q.message.reply_text(f"💼 **Wallet**: `{agent.keypair.pubkey()}`\nBalance: {bal:.4f} SOL", parse_mode="Markdown")
+        await q.message.reply_text(
+            f"💼 **Wallet**: `{agent.keypair.pubkey()}`\nBalance: {bal:.4f} SOL",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+        )
     elif q.data=="history":
         h = "\n".join(agent.history[-10:]) if agent.history else "No history"
-        await q.message.reply_text(f"📜 **History**:\n{h}", parse_mode="Markdown")
+        await q.message.reply_text(
+            f"📜 **History**:\n{h}",
+            parse_mode="Markdown",
+            reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+        )
 
 async def main():
     webapp = web.Application()
@@ -219,7 +255,10 @@ async def main():
     await web.TCPSite(runner,'0.0.0.0',int(os.environ.get("PORT",10000))).start()
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text("🤖 Agent Ready", reply_markup=main_menu_keyboard())))
+    app.add_handler(CommandHandler("start", lambda u,c: u.message.reply_text(
+        "🤖 Agent Ready",
+        reply_markup=main_menu_keyboard()  # ← INLINE KEYBOARD ADDED
+    )))
     app.add_handler(CallbackQueryHandler(button_handler))
 
     async with app:
