@@ -1,157 +1,105 @@
-🤖 Solana AI Agent Wallet
-Autonomous On-Chain Trading Agent with Dynamic Strategy Engine
-This repository contains a fully autonomous AI Agent Wallet built for the Solana ecosystem.
-Unlike traditional wallets that require manual interaction, this system acts as an independent on-chain trading entity — capable of analyzing market conditions, generating strategies, executing swaps, and managing positions in real time.
-It is designed as a prototype for Agentic Finance, where wallets evolve into intelligent actors rather than passive key holders.
-🚀 Key Features
-🧠 Autonomous AI Decision Engine
-The agent continuously:
-Fetches live market snapshots from Jupiter DevNet liquidity
-Sends structured data to an LLM
-Receives a strategy decision (BUY / SELL / WAIT)
-Dynamically calculates:
-Position size
-Take-profit
-Stop-loss
-Confidence score
-No hard-coded strategy logic — the AI determines behavior at runtime.
-🔗 Real On-Chain Execution
-✔ Generates and persists a Solana wallet
-✔ Signs transactions locally
-✔ Executes swaps through Jupiter DevNet
-✔ Broadcasts transactions via RPC
-✔ Returns Solscan links for verification
-This ensures every trade is verifiable on-chain, not simulated.
-📊 Position Lifecycle Management
-The agent tracks open trades and automatically:
-• Monitors price changes
-• Executes TP or SL conditions
-• Logs trades with timestamps
-• Updates position state
-This creates a fully autonomous trade lifecycle loop.
-💬 Telegram Command Interface
-The wallet is controlled through an interactive Telegram dashboard:
-Button
-Function
-🚀 Start Agent
-Starts autonomous trading loop
-🛑 Stop
-Halts trading safely
-💼 Wallet
-Displays public key + SOL balance
-📜 History
-Shows recent trades & actions
-Every message includes inline controls for continuous interaction.
-🧠 What Makes This an “Agent Wallet”
-Traditional Wallet
-Agent Wallet
-Signs transactions on request
-Initiates transactions autonomously
-Stores assets
-Manages positions actively
-User decides trades
-AI decides trades
-Manual execution
-Continuous execution loop
-Passive interface
-Conversational interface
-This system demonstrates the transition from wallet → intelligent financial agent.
-🏗️ System Architecture
-Components
-1️⃣ Identity Layer
-solders.Keypair
-Persistent wallet storage
-Deterministic identity per Telegram user
-2️⃣ Market Intelligence Layer
-Jupiter Quote API (price discovery)
-Multi-pair scanning engine
-Snapshot generator
-3️⃣ Cognitive Layer
-LLM strategy generation
-Structured JSON decision output
-Confidence-weighted position sizing
-4️⃣ Execution Layer
-Jupiter Swap API
-Transaction signing
-RPC broadcasting
-5️⃣ Interaction Layer
-Telegram Bot UI
-Inline control keyboard
-Real-time notifications
-🔄 Trading Loop Flow
-1️⃣ Agent fetches market snapshots
-2️⃣ AI evaluates opportunities
-3️⃣ If BUY → executes swap
-4️⃣ Position stored with TP/SL
-5️⃣ Loop monitors price
-6️⃣ TP/SL triggers SELL
-7️⃣ Trade logged and reported
-This loop runs continuously while the agent is active.
-🛡️ Security Model
-• Private keys stored locally only
-• No external custody
-• No browser injection
-• Stateless RPC interaction
-• Deterministic wallet restoration
-Designed for headless cloud environments (Render, Railway, VPS).
-🧪 Devnet Scope
-The current implementation runs on:
-👉 Solana Devnet
-👉 Jupiter Devnet Liquidity
-This ensures safe testing with real transaction flow without financial risk.
-📦 Installation
-Bash
-Copy code
+Solana AI Agent Wallet
+
+Autonomous On-Chain Trading Agent
+
+---
+
+1. Overview
+
+The Solana AI Agent Wallet is an autonomous software agent that combines a programmatic wallet with an AI decision engine to analyze markets and execute trades on-chain without manual intervention.
+
+Unlike traditional wallets that act purely as signing tools, this system operates as an independent participant capable of:
+
+* Generating and managing its own cryptographic identity.
+* Interpreting live market data.
+* Producing trading strategies via a Large Language Model (LLM).
+* Executing token swaps through decentralized liquidity.
+* Managing position lifecycle with automated exits.
+
+The project serves as a prototype for agent-driven finance, where wallets evolve into active decision-making entities.
+
+---
+
+2. Core Capabilities
+
+2.1 Autonomous Strategy Generation
+
+The agent continuously evaluates market snapshots and requests a structured decision from an AI model. The response includes:
+
+* Action: (BUY, SELL, WAIT)
+* Take-Profit: Dynamic percentage based on volatility.
+* Stop-Loss: Dynamic protection threshold.
+* Confidence Score: 0-100% metric used to determine dynamic position sizing.
+
+2.2 On-Chain Execution
+
+All trades are executed through Jupiter liquidity on Solana Devnet. The agent:
+
+1. Builds swap transactions via Versioned Transactions (V0).
+2. Signs them locally using the resident private key.
+3. Broadcasts via RPC to the Solana blockchain.
+4. Verifies transaction signatures for total transparency.
+
+2.3 Position Management
+
+Active positions are tracked internally. When exit conditions (TP/SL) are met, the agent triggers the swap, records the trade in history, and clears the internal state.
+
+2.4 Persistent Identity
+
+Each user session maintains a deterministic wallet stored locally. On restart, the agent restores the same identity, public key, and balances.
+
+2.5 Telegram Control Interface
+
+Command| Description
+Start Agent| Initiates the autonomous trading loop.
+Stop| Halts execution immediately.
+Wallet| Displays the public key and current SOL balance.
+History| Shows a log of the last 10 trades and signatures.
+
+---
+
+3. Architectural Model
+
+1. Identity Layer: Handles key generation, persistence, and local signing.
+2. Market Data Layer: Fetches pricing and depth from Jupiter and Raydium APIs.
+3. Decision Layer: Processes snapshots through an LLM to produce structured strategies.
+4. Execution Layer: Constructs and submits real-time swaps.
+5. Interface Layer: Provides real-time interaction via Telegram.
+
+---
+
+4. Trading Lifecycle
+
+1. Scan: Market data is collected across configured pairs (SOL, RAY, USDC).
+2. Reason: Snapshot is passed to the AI model for strategy generation.
+3. Plan: Model returns a decision and specific risk parameters.
+4. Act: If conditions are met, a real swap is executed on-chain.
+5. Monitor: Continuous evaluation of TP and SL exit triggers.
+6. Close: Position is closed automatically when thresholds are hit.
+
+---
+
+5. Security Considerations
+
+* Local Keys: Private keys never leave the execution environment.
+* Non-Custodial: No browser or external wallet integrations.
+* Stateless RPC: Secure communication with blockchain nodes.
+* Headless: Optimized for deployment on platforms like Render or AWS.
+
+---
+
+6. Environment Scope
+
+The current implementation operates exclusively on:
+
+* Network: Solana Devnet
+* Liquidity: Jupiter Devnet Liquidity Pools
+* Risk: Zero financial exposure using Devnet SOL
+
+---
+
+7. Installation
+
 git clone https://github.com/martadrian/solana-agent-wallet.git
 cd solana-agent-wallet
-
 pip install -r requirements.txt
-⚙️ Environment Variables
-Create .env:
-Env
-Copy code
-TELEGRAM_TOKEN=your_telegram_token
-OPENROUTER_API_KEY=your_openrouter_key
-RPC_URL=https://api.devnet.solana.com
-▶️ Run the Agent
-Bash
-Copy code
-python bot.py
-Then open Telegram and press Start Agent.
-📈 Roadmap
-Near Term
-Real depth aggregation
-Multi-position portfolio management
-Risk budget per trade
-PnL dashboard
-Mid Term
-Mainnet deployment mode
-Strategy memory layer
-Reinforcement learning feedback loop
-Multi-DEX routing
-Long Term Vision
-A fully autonomous financial agent economy where wallets:
-Negotiate liquidity
-Provide market making
-Execute cross-chain arbitrage
-Coordinate with other agents
-🧩 Competition Positioning
-This project demonstrates:
-✅ Autonomous execution
-✅ On-chain verifiability
-✅ AI-driven decision making
-✅ Persistent identity
-✅ Real transaction lifecycle
-It fits the category of:
-👉 Agentic DeFi Infrastructure
-👉 AI x Crypto Wallets
-👉 Autonomous Trading Agents
-⚠️ Disclaimer
-This project is experimental and for research purposes only.
-Do not use on mainnet with real funds without additional security review.
-If you want, I can also next:
-✅ Write a short competition submission description (1–2 paragraphs)
-✅ Create a technical whitepaper style README
-✅ Add an architecture diagram section
-✅ Write a pitch deck outline
-Just tell me which 👍
