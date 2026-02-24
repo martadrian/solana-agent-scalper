@@ -1,106 +1,48 @@
 ---
-
 name: solana-autonomous-trading-wallet
-description: Autonomous AI trading agent performing multi-pair analysis, Jupiter-based swap execution, and automated position lifecycle management on Solana Devnet.
+description: "Autonomous AI trading agent performing multi-pair analysis, Jupiter-based swap execution, and automated position lifecycle management on Solana Devnet."
 version: 1.1.0
 author: martadrian
 license: MIT
-compatibility: Solana Devnet, Python 3.10+, OpenAI/OpenRouter API
-
+compatibility: "Solana Devnet, Python 3.10+, OpenAI/OpenRouter API"
+---
 Solana Autonomous Trading Skill
-
-This skill enables an AI agent to function as a self-custodial portfolio operator on the Solana blockchain.
-It establishes a continuous execution loop combining live market observation, AI-driven strategy generation, and on-chain transaction execution.
-
----
-
+This skill allows an AI agent to operate as a self-custodial fund manager on the Solana blockchain. It provides a complete loop for market monitoring, AI-based decision making, and automated trade execution.
 Core Capabilities
-
 1. Market Awareness
-
-- Multi-Pair Monitoring
-  Continuously scans liquidity across key trading pairs: "SOL/RAY", "SOL/USDC", and "RAY/USDC".
-
-- Real-Time Pricing
-  Retrieves live quotes and routing data through Jupiter Aggregator APIs to maintain accurate market context.
-
----
-
+Multi-Pair Scanning: Monitors token pairs SOL/RAY, SOL/USDC, and RAY/USDC.
+Order Book Fetching: Retrieves real-time pricing and depth via Jupiter Quote API.
 2. Autonomous Decision Making
-
-- Confidence-Weighted Position Sizing
-  Trade allocation is dynamically adjusted according to the AI model’s confidence score (0–100%).
-
-- Structured Strategy Output
-  Produces machine-readable trade decisions containing:
-  
-  - "action" → BUY / SELL / WAIT
-  - "tp_pct" → Take-Profit threshold
-  - "sl_pct" → Stop-Loss threshold
-
----
-
+Confidence-Weighted Sizing: Dynamically sizes trades based on AI confidence (0–100%).
+Structured Strategy Output: Generates JSON with keys:
+action (BUY, SELL, WAIT)
+tp_pct (Take-Profit %)
+sl_pct (Stop-Loss %)
+confidence (0–100)
 3. On-Chain Execution
-
-- Jupiter Swap Integration
-  Builds and signs Versioned Transactions for real Devnet swaps via Jupiter liquidity routes.
-
-- Automated Position Lifecycle
-  Continuously monitors open positions and autonomously executes exit trades when TP or SL conditions are met.
-
----
-
+Jupiter Swap Integration: Executes swaps via Versioned Transactions (V0) on Devnet.
+Automated Lifecycle Management: Monitors active positions to trigger Take-Profit or Stop-Loss without manual input.
 How to Use This Skill
-
 Triggers
-
-Invoke this skill when:
-
-- An autonomous trading session needs to be initiated
-- Continuous monitoring of specified token pairs is required
-- Capital should be managed with automated risk controls
-
----
-
-Operational Flow
-
-1. Initialization
-   Load or create the deterministic wallet from "wallet_{chat_id}.json".
-
-2. Execution Loop
-   
-   - Call "fetch_market_snapshots()" to obtain current price context
-   - Run "check_positions()" to evaluate exit conditions
-   - Submit data to "generate_strategy()" for AI reasoning
-
-3. Trade Execution
-   If the AI response returns "BUY" or "SELL", invoke "execute_actual_swap()" to sign and broadcast the transaction.
-
----
-
+Use this skill when:
+Starting an autonomous trading cycle on Solana Devnet.
+Continuous monitoring of specific token pairs is required.
+Automated risk management (TP/SL) is desired.
+Operational Instructions
+Initialization: Load or create the deterministic wallet from wallet_{chat_id}.json.
+Market Loop:
+fetch_market_snapshots() → retrieves current market prices.
+check_positions() → evaluates active positions for exit triggers.
+generate_strategy() → AI produces the next trade signal.
+Execution: If action is BUY or SELL, call execute_actual_swap() to sign and broadcast the transaction.
 Security Controls
-
-- Private Key Isolation
-  Keys remain stored locally and are never exposed to the AI model or external services.
-
-- Slippage Protection
-  Default slippage tolerance set to 100 Bps (1%) to mitigate adverse execution.
-
-- Environment Restriction
-  Hard-coded to Solana Devnet to eliminate risk of real-fund exposure.
-
----
-
+Private Key Isolation: Keys remain local, never transmitted externally.
+Slippage Protection: Locked at 100 Bps (1%) by default to prevent front-running.
+Devnet Locked: Operates exclusively on Devnet to avoid real-fund risk.
 Technical Specifications
-
-- Blockchain Network: Solana Devnet
-- Liquidity Source: Jupiter Aggregator (v4)
-- Execution Runtime: Python async event loop
-- Interface Layer: Telegram Bot API
-- Transaction Format: Versioned Transactions (V0)
-
----
-
-Summary
-
-This skill transforms a standard programmatic wallet into an autonomous trading entity capable of observing markets, reasoning over data, and executing on-chain actions independently. It is designed as a research and demonstration framework for AI-driven financial agents operating in decentralized environments.
+Blockchain: Solana (Devnet)
+DEX Aggregator: Jupiter v4
+Interface: Telegram Bot API
+Language: Python 3.10+
+AI Integration: OpenAI / OpenRouter API
+Key Management: Local deterministic wallet persistence (wallet_{chat_id}.json)
