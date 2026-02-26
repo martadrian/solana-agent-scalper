@@ -476,7 +476,7 @@ async def autonomous_loop(chat_id, bot):
                     sig, details = result
                     solscan = "https://solscan.io/tx/" + sig + "?cluster=devnet"
                     
-                    # Simple string concatenation instead of f-strings
                     action_str = decision['action']
                     conf_str = str(decision['confidence'])
-                    reason_str = decision.get(
+                    reason_str = decision.get('reasoning', 'N/A')[:100]
+                    risk_str = decision.get('
