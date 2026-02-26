@@ -123,7 +123,7 @@ class AutonomousAgent:
         older = prices[-10:-5]
         if recent[-1] > older[-1] * 1.02:
             return "UPTREND"
-        elif recent[-1] < older[-1] * 0.98:
+        elif recent[-1] < older[1] * 0.98:
             return "DOWNTREND"
         return "SIDEWAYS"
 
@@ -233,7 +233,7 @@ class AutonomousAgent:
         if action == "BUY":
             return await self._execute_buy(amount, decision, market_data)
         elif action == "SELL":
-            return await self._execute_sell(decision)
+            return await self._execute_sell(decision, market_data)
         
         return None
 
@@ -303,7 +303,7 @@ class AutonomousAgent:
             logging.error("Buy execution error: " + str(e))
             return None
 
-    async def _execute_sell(self, decision):
+    async def _execute_sell(self, decision, market_data):
         if not self.active_positions:
             return None
         
@@ -344,7 +344,8 @@ class AutonomousAgent:
                 
                 sig = await self.client.send_raw_transaction(tx.serialize())
                 
-                exit_price = position["amount"]
+                # FIXED: Use actual current price from market_data instead of position["amount"]
+                exit_price = market_data["current_price"]
                 pnl = (exit_price - position["entry_price"]) * position["amount"]
                 
                 self.trade_history.append({
@@ -477,6 +478,4 @@ async def autonomous_loop(chat_id, bot):
                     solscan = "https://solscan.io/tx/" + sig + "?cluster=devnet"
                     
                     action_str = decision['action']
-                    conf_str = str(decision['confidence'])
-                    reason_str = decision.get('reasoning', 'N/A')[:100]
-                    risk_str = decision.get('
+                    conf_str = str(decision[
