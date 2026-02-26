@@ -527,7 +527,7 @@ async def autonomous_loop(chat_id, bot):
                         fail_msg,
                         reply_markup=main_menu_keyboard()
                     )
-                        else:
+            else:
                 wait_reason = decision.get('reasoning', 'No reason')[:50]
                 logging.info("AI decided to WAIT: " + wait_reason)
 
