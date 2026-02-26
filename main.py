@@ -527,6 +527,121 @@ async def autonomous_loop(chat_id, bot):
                         fail_msg,
                         reply_markup=main_menu_keyboard()
                     )
-            else:
+                        else:
                 wait_reason = decision.get('reasoning', 'No reason')[:50]
-                logging.info("AI decided to 
+                logging.info("AI decided to WAIT: " + wait_reason)
+
+            await agent.check_positions(market_data["current_price"], bot)
+
+            await asyncio.sleep(60)
+
+        except Exception as e:
+            logging.error("Autonomous loop error: " + str(e))
+            await asyncio.sleep(60)
+
+
+class AgentManager:
+    def __init__(self):
+        self.agents = {}
+        self.tasks = {}
+
+    def get_agent(self, chat_id):
+        if chat_id not in self.agents:
+            self.agents[chat_id] = AutonomousAgent(chat_id)
+        return self.agents[chat_id]
+
+    def start(self, chat_id, bot):
+        agent = self.get_agent(chat_id)
+        if not agent.is_running:
+            agent.is_running = True
+            task = asyncio.create_task(autonomous_loop(chat_id, bot))
+            self.tasks[chat_id] = task
+            return True
+        return False
+
+    def stop(self, chat_id):
+        agent = self.get_agent(chat_id)
+        if agent.is_running:
+            agent.is_running = False
+            if chat_id in self.tasks:
+                self.tasks[chat_id].cancel()
+                del self.tasks[chat_id]
+            return True
+        return False
+
+
+manager = AgentManager()
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat_id
+    agent = manager.get_agent(chat_id)
+
+    if q.data == "run":
+        if manager.start(chat_id, context.bot):
+            await q.edit_message_text("Starting autonomous AI...", reply_markup=main_menu_keyboard())
+        else:
+            await q.edit_message_text("Already running!", reply_markup=main_menu_keyboard())
+
+    elif q.data == "stop":
+        if manager.stop(chat_id):
+            await q.edit_message_text("Autonomous AI stopped", reply_markup=main_menu_keyboard())
+        else:
+            await q.edit_message_text("Not running", reply_markup=main_menu_keyboard())
+
+    elif q.data == "wallet":
+        bal = await agent.get_balance()
+        addr = str(agent.keypair.pubkey())
+        wallet_msg = "Wallet: " + addr + "\nBalance: " + str(bal) + " SOL"
+        await q.edit_message_text(wallet_msg, reply_markup=main_menu_keyboard())
+
+    elif q.data == "history":
+        h = agent.trade_history[-10:] if agent.trade_history else []
+        text = "Recent AI trades:\n\n"
+        for t in h:
+            text += t['action'] + " @ " + str(t.get('price', 'N/A')) + ": " + t.get('ai_reasoning', 'N/A')[:50] + "...\n\n"
+        if not text.strip():
+            text = "No trades yet"
+        await q.edit_message_text(text, reply_markup=main_menu_keyboard())
+
+    elif q.data == "status":
+        status = "AUTONOMOUS" if agent.is_running else "Stopped"
+        perf = agent._calculate_performance()
+        status_msg = status + "\nLoops: " + str(agent.loop_count) + "\nTrades: " + str(perf['total_trades']) + "\nWin Rate: " + str(perf['win_rate']*100) + "%\nTotal P&L: " + str(perf['total_pnl'])
+        await q.edit_message_text(status_msg, reply_markup=main_menu_keyboard())
+
+
+async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    start_msg = "AUTONOMOUS SOLANA TRADER\n\nThis AI has full control over trading decisions.\nNo human rules. No validation. Pure AI autonomy.\n\nWarning: The AI decides when to buy, sell, or wait.\nIt learns from market patterns and its own trade history."
+    await update.message.reply_text(start_msg, reply_markup=main_menu_keyboard())
+
+
+async def main():
+    app = web.Application()
+    app.router.add_get('/', lambda r: web.Response(text="Autonomous Bot Running"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+    logging.info("Web server on port " + str(PORT))
+
+    telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    telegram_app.add_handler(CommandHandler("start", start_handler))
+    telegram_app.add_handler(CallbackQueryHandler(button_handler))
+
+    await telegram_app.initialize()
+    await telegram_app.start()
+    await telegram_app.updater.start_polling(drop_pending_updates=True)
+
+    logging.info("AUTONOMOUS BOT READY")
+
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+ 
