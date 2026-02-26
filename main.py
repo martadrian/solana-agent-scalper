@@ -1,5 +1,12 @@
-import os, asyncio, nest_asyncio, logging, json, base64, httpx, math, sys
-from datetime import datetime, timedelta
+import os
+import asyncio
+import nest_asyncio
+import logging
+import json
+import base64
+import httpx
+import sys
+from datetime import datetime
 from aiohttp import web
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
@@ -30,6 +37,7 @@ TOKENS = {
 JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6/quote"
 JUPITER_SWAP_API = "https://quote-api.jup.ag/v6/swap"
 
+
 def main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Start Agent", callback_data="run"),
@@ -38,6 +46,7 @@ def main_menu_keyboard():
          InlineKeyboardButton("History", callback_data="history")],
         [InlineKeyboardButton("Status", callback_data="status")]
     ])
+
 
 class AutonomousAgent:
     def __init__(self, chat_id):
@@ -50,7 +59,7 @@ class AutonomousAgent:
         self.price_history = []
         self.trade_history = []
         self.loop_count = 0
-        
+
     def _load_or_create_wallet(self):
         if WALLET_SECRET:
             try:
@@ -82,21 +91,21 @@ class AutonomousAgent:
                 }
                 resp = await client.get(JUPITER_QUOTE_API, params=params)
                 data = resp.json()
-                
+
                 if not data.get("data"):
                     return None
-                
+
                 current_price = int(data["data"][0]["outAmount"]) / 1e6
-                
+
                 self.price_history.append({
                     "timestamp": datetime.now().isoformat(),
                     "price": current_price
                 })
                 if len(self.price_history) > 100:
                     self.price_history.pop(0)
-                
+
                 prices = [p["price"] for p in self.price_history]
-                
+
                 return {
                     "current_price": current_price,
                     "price_history": prices[-20:],
@@ -123,7 +132,7 @@ class AutonomousAgent:
         older = prices[-10:-5]
         if recent[-1] > older[-1] * 1.02:
             return "UPTREND"
-        elif recent[-1] < older[1] * 0.98:
+        elif recent[-1] < older[-1] * 0.98:
             return "DOWNTREND"
         return "SIDEWAYS"
 
@@ -151,8 +160,29 @@ class AutonomousAgent:
                 "performance": self._calculate_performance()
             }
         }
-        
-        prompt = "You are an AUTONOMOUS crypto trading AI. Analyze the market and decide.\n\nCONTEXT: " + json.dumps(context, indent=2) + "\n\nDECISION FRAMEWORK:\n- You have FULL autonomy to BUY, SELL, or WAIT\n- No human rules or validation - you decide based on market analysis\n- Consider: price action, trends, volatility, patterns, support/resistance\n- Learn from your past trades in the memory\n\nRESPONSE FORMAT (JSON only):\n{\n  \"action\": \"BUY\" or \"SELL\" or \"WAIT\",\n  \"confidence\": 0-100,\n  \"amount_percent\": 10-100,\n  \"tp_percent\": number,\n  \"sl_percent\": number,\n  \"reasoning\": \"Detailed technical analysis of why you made this decision\",\n  \"risk_assessment\": \"Your evaluation of trade risk\"\n}\n\nMake your decision now:"
+
+        prompt = """You are an AUTONOMOUS crypto trading AI. Analyze the market and decide.
+
+CONTEXT: """ + json.dumps(context, indent=2) + """
+
+DECISION FRAMEWORK:
+- You have FULL autonomy to BUY, SELL, or WAIT
+- No human rules or validation - you decide based on market analysis
+- Consider: price action, trends, volatility, patterns, support/resistance
+- Learn from your past trades in the memory
+
+RESPONSE FORMAT (JSON only):
+{
+  "action": "BUY" or "SELL" or "WAIT",
+  "confidence": 0-100,
+  "amount_percent": 10-100,
+  "tp_percent": number,
+  "sl_percent": number,
+  "reasoning": "Detailed technical analysis of why you made this decision",
+  "risk_assessment": "Your evaluation of trade risk"
+}
+
+Make your decision now:"""
 
         try:
             response = requests.post(
@@ -173,22 +203,22 @@ class AutonomousAgent:
                 },
                 timeout=30
             )
-            
+
             if response.status_code != 200:
                 logging.error("AI API error: " + str(response.status_code))
                 return None
-            
+
             content = response.json()["choices"][0]["message"]["content"]
-            
+
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0]
             elif "```" in content:
                 content = content.split("```")[1].split("```")[0]
-            
+
             decision = json.loads(content.strip())
             logging.info("AI DECISION: " + str(decision))
             return decision
-            
+
         except Exception as e:
             logging.error("AI decision error: " + str(e))
             return None
@@ -196,14 +226,14 @@ class AutonomousAgent:
     def _calculate_performance(self):
         if not self.trade_history:
             return {"total_trades": 0, "win_rate": 0, "total_pnl": 0}
-        
+
         closed_trades = [t for t in self.trade_history if "profit_loss" in t]
         if not closed_trades:
             return {"total_trades": len(self.trade_history), "win_rate": 0, "total_pnl": 0}
-        
+
         wins = sum(1 for t in closed_trades if t["profit_loss"] > 0)
         total_pnl = sum(t["profit_loss"] for t in closed_trades)
-        
+
         return {
             "total_trades": len(closed_trades),
             "win_rate": wins / len(closed_trades),
@@ -214,27 +244,27 @@ class AutonomousAgent:
     async def execute_trade(self, decision, market_data):
         action = decision.get("action", "WAIT")
         confidence = decision.get("confidence", 0)
-        
+
         if action == "WAIT" or confidence < 20:
             logging.info("AI decided to WAIT (confidence: " + str(confidence) + ")")
             return None
-        
+
         balance = market_data["balance"]
         amount_percent = decision.get("amount_percent", 50)
         amount = balance * (amount_percent / 100)
-        
+
         amount = min(amount, balance * 0.5)
         amount = max(amount, 0.01)
-        
+
         if amount > balance:
             logging.warning("Insufficient balance for AI's desired trade")
             return None
-        
+
         if action == "BUY":
             return await self._execute_buy(amount, decision, market_data)
         elif action == "SELL":
             return await self._execute_sell(decision, market_data)
-        
+
         return None
 
     async def _execute_buy(self, amount, decision, market_data):
@@ -248,34 +278,34 @@ class AutonomousAgent:
                 }
                 quote_resp = await client.get(JUPITER_QUOTE_API, params=quote_params)
                 quote_data = quote_resp.json()
-                
+
                 if not quote_data.get("data"):
                     return None
-                
+
                 swap_body = {
                     "quoteResponse": quote_data,
                     "userPublicKey": str(self.keypair.pubkey()),
                     "wrapAndUnwrapSOL": True
                 }
-                
+
                 swap_resp = await client.post(JUPITER_SWAP_API, json=swap_body)
                 swap_data = swap_resp.json()
-                
+
                 if not swap_data.get("swapTransaction"):
                     return None
-                
+
                 raw_tx = base64.b64decode(swap_data["swapTransaction"])
                 tx = VersionedTransaction.from_bytes(raw_tx)
-                
+
                 recent_bh = await self.client.get_latest_blockhash()
                 tx.message.recent_blockhash = recent_bh.value.blockhash
                 tx.sign([self.keypair])
-                
+
                 sig = await self.client.send_raw_transaction(tx.serialize())
-                
+
                 tp = market_data["current_price"] * (1 + decision.get("tp_percent", 2) / 100)
                 sl = market_data["current_price"] * (1 - decision.get("sl_percent", 2) / 100)
-                
+
                 position = {
                     "entry_price": market_data["current_price"],
                     "amount": amount,
@@ -286,7 +316,7 @@ class AutonomousAgent:
                     "ai_decision": decision
                 }
                 self.active_positions.append(position)
-                
+
                 self.trade_history.append({
                     "action": "BUY",
                     "price": market_data["current_price"],
@@ -295,10 +325,10 @@ class AutonomousAgent:
                     "ai_reasoning": decision.get("reasoning", ""),
                     "timestamp": datetime.now().isoformat()
                 })
-                
+
                 logging.info("BUY executed: " + str(amount) + " SOL at " + str(market_data['current_price']))
                 return sig.value, position
-                
+
         except Exception as e:
             logging.error("Buy execution error: " + str(e))
             return None
@@ -306,9 +336,9 @@ class AutonomousAgent:
     async def _execute_sell(self, decision, market_data):
         if not self.active_positions:
             return None
-        
+
         position = self.active_positions[0]
-        
+
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 quote_params = {
@@ -319,35 +349,34 @@ class AutonomousAgent:
                 }
                 quote_resp = await client.get(JUPITER_QUOTE_API, params=quote_params)
                 quote_data = quote_resp.json()
-                
+
                 if not quote_data.get("data"):
                     return None
-                
+
                 swap_body = {
                     "quoteResponse": quote_data,
                     "userPublicKey": str(self.keypair.pubkey()),
                     "wrapAndUnwrapSOL": True
                 }
-                
+
                 swap_resp = await client.post(JUPITER_SWAP_API, json=swap_body)
                 swap_data = swap_resp.json()
-                
+
                 if not swap_data.get("swapTransaction"):
                     return None
-                
+
                 raw_tx = base64.b64decode(swap_data["swapTransaction"])
                 tx = VersionedTransaction.from_bytes(raw_tx)
-                
+
                 recent_bh = await self.client.get_latest_blockhash()
                 tx.message.recent_blockhash = recent_bh.value.blockhash
                 tx.sign([self.keypair])
-                
+
                 sig = await self.client.send_raw_transaction(tx.serialize())
-                
-                # FIXED: Use actual current price from market_data instead of position["amount"]
+
                 exit_price = market_data["current_price"]
                 pnl = (exit_price - position["entry_price"]) * position["amount"]
-                
+
                 self.trade_history.append({
                     "action": "SELL",
                     "entry_price": position["entry_price"],
@@ -358,12 +387,12 @@ class AutonomousAgent:
                     "ai_reasoning": decision.get("reasoning", ""),
                     "timestamp": datetime.now().isoformat()
                 })
-                
+
                 self.active_positions.remove(position)
-                
+
                 logging.info("SELL executed: P&L " + str(pnl))
                 return sig.value, pnl
-                
+
         except Exception as e:
             logging.error("Sell execution error: " + str(e))
             return None
@@ -388,33 +417,33 @@ class AutonomousAgent:
                 }
                 quote_resp = await client.get(JUPITER_QUOTE_API, params=quote_params)
                 quote_data = quote_resp.json()
-                
+
                 if not quote_data.get("data"):
                     return
-                
+
                 swap_body = {
                     "quoteResponse": quote_data,
                     "userPublicKey": str(self.keypair.pubkey()),
                     "wrapAndUnwrapSOL": True
                 }
-                
+
                 swap_resp = await client.post(JUPITER_SWAP_API, json=swap_body)
                 swap_data = swap_resp.json()
-                
+
                 if not swap_data.get("swapTransaction"):
                     return
-                
+
                 raw_tx = base64.b64decode(swap_data["swapTransaction"])
                 tx = VersionedTransaction.from_bytes(raw_tx)
-                
+
                 recent_bh = await self.client.get_latest_blockhash()
                 tx.message.recent_blockhash = recent_bh.value.blockhash
                 tx.sign([self.keypair])
-                
+
                 sig = await self.client.send_raw_transaction(tx.serialize())
-                
+
                 pnl = (current_price - position["entry_price"]) * position["amount"]
-                
+
                 self.trade_history.append({
                     "action": "SELL",
                     "entry_price": position["entry_price"],
@@ -425,57 +454,79 @@ class AutonomousAgent:
                     "close_reason": reason,
                     "timestamp": datetime.now().isoformat()
                 })
-                
+
                 self.active_positions.remove(position)
-                
+
                 solscan = "https://solscan.io/tx/" + sig.value + "?cluster=devnet"
-                
+
                 message = "Position Closed (" + reason + ")\nP&L: " + str(pnl) + "\n[View on Solscan](" + solscan + ")"
-                
+
                 await bot.send_message(
                     self.chat_id,
                     message,
                     parse_mode="Markdown",
                     reply_markup=main_menu_keyboard()
                 )
-                
+
         except Exception as e:
             logging.error("Close position error: " + str(e))
 
+
 async def autonomous_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
-    
+
     await bot.send_message(
         chat_id,
         "AUTONOMOUS AGENT STARTED\n\nThe AI is now in control.\nIt will analyze the market and make its own decisions.\nNo human rules applied.",
         reply_markup=main_menu_keyboard()
     )
-    
+
     while agent.is_running:
         try:
             agent.loop_count += 1
             logging.info("AUTONOMOUS LOOP #" + str(agent.loop_count))
-            
+
             market_data = await agent.fetch_market_data()
             if not market_data:
                 logging.error("Failed to fetch market data")
                 await asyncio.sleep(30)
                 continue
-            
+
             logging.info("Price: " + str(market_data['current_price']) + ", Balance: " + str(market_data['balance']))
-            
+
             decision = await agent.ai_decision(market_data)
             if not decision:
                 logging.error("AI failed to decide")
                 await asyncio.sleep(30)
                 continue
-            
+
             if decision["action"] in ["BUY", "SELL"]:
                 result = await agent.execute_trade(decision, market_data)
-                
+
                 if result:
                     sig, details = result
                     solscan = "https://solscan.io/tx/" + sig + "?cluster=devnet"
-                    
+
                     action_str = decision['action']
-                    conf_str = str(decision[
+                    conf_str = str(decision['confidence'])
+                    reason_str = decision.get('reasoning', 'N/A')[:100]
+                    risk_str = decision.get('risk_assessment', 'N/A')
+
+                    message = "AI AUTONOMOUS TRADE\n\nAction: " + action_str + "\nConfidence: " + conf_str + "%\nReasoning: " + reason_str + "...\nRisk: " + risk_str + "\n\n[View on Solscan](" + solscan + ")"
+
+                    await bot.send_message(
+                        chat_id,
+                        message,
+                        parse_mode="Markdown",
+                        reply_markup=main_menu_keyboard()
+                    )
+                else:
+                    fail_msg = "AI decided to " + decision['action'] + " but execution failed"
+                    await bot.send_message(
+                        chat_id,
+                        fail_msg,
+                        reply_markup=main_menu_keyboard()
+                    )
+            else:
+                wait_reason = decision.get('reasoning', 'No reason')[:50]
+                logging.info("AI decided to 
