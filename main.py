@@ -60,8 +60,8 @@ class AutonomousAgent:
                 pass
         kp = Keypair()
         secret = base64.b64encode(bytes(kp)).decode()
-        logging.info(f"NEW WALLET: {kp.pubkey()}")
-        logging.info(f"SAVE THIS: {secret}")
+        logging.info("NEW WALLET: " + str(kp.pubkey()))
+        logging.info("SAVE THIS: " + secret)
         return kp
 
     async def get_balance(self):
@@ -107,7 +107,7 @@ class AutonomousAgent:
                     "last_trade_result": self._last_trade_result()
                 }
         except Exception as e:
-            logging.error(f"Market data error: {e}")
+            logging.error("Market data error: " + str(e))
             return None
 
     def _calc_volatility(self, prices):
@@ -132,7 +132,7 @@ class AutonomousAgent:
             return "No previous trades"
         last = self.trade_history[-1]
         if "profit_loss" in last:
-            return f"Last trade P&L: {last['profit_loss']:.4f}"
+            return "Last trade P&L: " + str(last['profit_loss'])
         return "Last trade pending"
 
     async def ai_decision(self, market_data):
@@ -152,34 +152,13 @@ class AutonomousAgent:
             }
         }
         
-        prompt = f"""You are an AUTONOMOUS crypto trading AI. Analyze the market and decide.
-
-CONTEXT: {json.dumps(context, indent=2)}
-
-DECISION FRAMEWORK:
-- You have FULL autonomy to BUY, SELL, or WAIT
-- No human rules or validation - you decide based on market analysis
-- Consider: price action, trends, volatility, patterns, support/resistance
-- Learn from your past trades in the memory
-
-RESPONSE FORMAT (JSON only):
-{{
-  "action": "BUY" or "SELL" or "WAIT",
-  "confidence": 0-100,
-  "amount_percent": 10-100,
-  "tp_percent": number,
-  "sl_percent": number,
-  "reasoning": "Detailed technical analysis of why you made this decision",
-  "risk_assessment": "Your evaluation of trade risk"
-}}
-
-Make your decision now:"""
+        prompt = "You are an AUTONOMOUS crypto trading AI. Analyze the market and decide.\n\nCONTEXT: " + json.dumps(context, indent=2) + "\n\nDECISION FRAMEWORK:\n- You have FULL autonomy to BUY, SELL, or WAIT\n- No human rules or validation - you decide based on market analysis\n- Consider: price action, trends, volatility, patterns, support/resistance\n- Learn from your past trades in the memory\n\nRESPONSE FORMAT (JSON only):\n{\n  \"action\": \"BUY\" or \"SELL\" or \"WAIT\",\n  \"confidence\": 0-100,\n  \"amount_percent\": 10-100,\n  \"tp_percent\": number,\n  \"sl_percent\": number,\n  \"reasoning\": \"Detailed technical analysis of why you made this decision\",\n  \"risk_assessment\": \"Your evaluation of trade risk\"\n}\n\nMake your decision now:"
 
         try:
             response = requests.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Authorization": "Bearer " + OPENROUTER_API_KEY,
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://render.com"
                 },
@@ -196,7 +175,7 @@ Make your decision now:"""
             )
             
             if response.status_code != 200:
-                logging.error(f"AI API error: {response.status_code}")
+                logging.error("AI API error: " + str(response.status_code))
                 return None
             
             content = response.json()["choices"][0]["message"]["content"]
@@ -207,11 +186,11 @@ Make your decision now:"""
                 content = content.split("```")[1].split("```")[0]
             
             decision = json.loads(content.strip())
-            logging.info(f"AI DECISION: {decision}")
+            logging.info("AI DECISION: " + str(decision))
             return decision
             
         except Exception as e:
-            logging.error(f"AI decision error: {e}")
+            logging.error("AI decision error: " + str(e))
             return None
 
     def _calculate_performance(self):
@@ -237,7 +216,7 @@ Make your decision now:"""
         confidence = decision.get("confidence", 0)
         
         if action == "WAIT" or confidence < 20:
-            logging.info(f"AI decided to WAIT (confidence: {confidence})")
+            logging.info("AI decided to WAIT (confidence: " + str(confidence) + ")")
             return None
         
         balance = market_data["balance"]
@@ -317,11 +296,11 @@ Make your decision now:"""
                     "timestamp": datetime.now().isoformat()
                 })
                 
-                logging.info(f"BUY executed: {amount} SOL at {market_data['current_price']}")
+                logging.info("BUY executed: " + str(amount) + " SOL at " + str(market_data['current_price']))
                 return sig.value, position
                 
         except Exception as e:
-            logging.error(f"Buy execution error: {e}")
+            logging.error("Buy execution error: " + str(e))
             return None
 
     async def _execute_sell(self, decision):
@@ -381,20 +360,20 @@ Make your decision now:"""
                 
                 self.active_positions.remove(position)
                 
-                logging.info(f"SELL executed: P&L {pnl:.4f}")
+                logging.info("SELL executed: P&L " + str(pnl))
                 return sig.value, pnl
                 
         except Exception as e:
-            logging.error(f"Sell execution error: {e}")
+            logging.error("Sell execution error: " + str(e))
             return None
 
     async def check_positions(self, current_price, bot):
         for pos in list(self.active_positions):
             if current_price >= pos["tp"]:
-                logging.info(f"Take profit hit: {current_price} >= {pos['tp']}")
+                logging.info("Take profit hit: " + str(current_price) + " >= " + str(pos['tp']))
                 await self._close_position(pos, "TP", current_price, bot)
             elif current_price <= pos["sl"]:
-                logging.info(f"Stop loss hit: {current_price} <= {pos['sl']}")
+                logging.info("Stop loss hit: " + str(current_price) + " <= " + str(pos['sl']))
                 await self._close_position(pos, "SL", current_price, bot)
 
     async def _close_position(self, position, reason, current_price, bot):
@@ -448,36 +427,33 @@ Make your decision now:"""
                 
                 self.active_positions.remove(position)
                 
-                solscan = f"https://solscan.io/tx/{sig.value}?cluster=devnet"
+                solscan = "https://solscan.io/tx/" + sig.value + "?cluster=devnet"
+                
+                message = "Position Closed (" + reason + ")\nP&L: " + str(pnl) + "\n[View on Solscan](" + solscan + ")"
                 
                 await bot.send_message(
                     self.chat_id,
-                    f"Position Closed ({reason})\n"
-                    f"P&L: {pnl:.4f}\n"
-                    f"[View on Solscan]({solscan})",
+                    message,
                     parse_mode="Markdown",
                     reply_markup=main_menu_keyboard()
                 )
                 
         except Exception as e:
-            logging.error(f"Close position error: {e}")
+            logging.error("Close position error: " + str(e))
 
 async def autonomous_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     
     await bot.send_message(
         chat_id,
-        "AUTONOMOUS AGENT STARTED\n\n"
-        "The AI is now in control.\n"
-        "It will analyze the market and make its own decisions.\n"
-        "No human rules applied.",
+        "AUTONOMOUS AGENT STARTED\n\nThe AI is now in control.\nIt will analyze the market and make its own decisions.\nNo human rules applied.",
         reply_markup=main_menu_keyboard()
     )
     
     while agent.is_running:
         try:
             agent.loop_count += 1
-            logging.info(f"AUTONOMOUS LOOP #{agent.loop_count}")
+            logging.info("AUTONOMOUS LOOP #" + str(agent.loop_count))
             
             market_data = await agent.fetch_market_data()
             if not market_data:
@@ -485,7 +461,7 @@ async def autonomous_loop(chat_id, bot):
                 await asyncio.sleep(30)
                 continue
             
-            logging.info(f"Price: {market_data['current_price']:.4f}, Balance: {market_data['balance']:.4f}")
+            logging.info("Price: " + str(market_data['current_price']) + ", Balance: " + str(market_data['balance']))
             
             decision = await agent.ai_decision(market_data)
             if not decision:
@@ -498,13 +474,9 @@ async def autonomous_loop(chat_id, bot):
                 
                 if result:
                     sig, details = result
-                    solscan = f"https://solscan.io/tx/{sig}?cluster=devnet"
+                    solscan = "https://solscan.io/tx/" + sig + "?cluster=devnet"
                     
-                    # Fixed: Properly formatted f-string on single line
-                    risk_text = decision.get('risk_assessment', 'N/A')
-                    reason_text = decision.get('reasoning', 'N/A')[:100]
-                    
-                    await bot.send_message(
-                        chat_id,
-                        f"AI AUTONOMOUS TRADE\n\n"
-                  
+                    # Simple string concatenation instead of f-strings
+                    action_str = decision['action']
+                    conf_str = str(decision['confidence'])
+                    reason_str = decision.get(
