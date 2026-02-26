@@ -397,72 +397,7 @@ Make your decision now:"""
                 logging.info(f"Stop loss hit: {current_price} <= {pos['sl']}")
                 await self._close_position(pos, "SL", current_price, bot)
 
-    async def _close_position(self, position, reason, current_price, bot):
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                quote_params = {
-                    "inputMint": TOKENS["USDC"],
-                    "outputMint": TOKENS["SOL"],
-                    "amount": str(int(position["amount"] * 1e9)),
-                    "slippageBps": "100"
-                }
-                quote_resp = await client.get(JUPITER_QUOTE_API, params=quote_params)
-                quote_data = quote_resp.json()
-                
-                if not quote_data.get("data"):
-                    return
-                
-                swap_body = {
-                    "quoteResponse": quote_data,
-                    "userPublicKey": str(self.keypair.pubkey()),
-                    "wrapAndUnwrapSOL": True
-                }
-                
-                swap_resp = await client.post(JUPITER_SWAP_API, json=swap_body)
-                swap_data = swap_resp.json()
-                
-                if not swap_data.get("swapTransaction"):
-                    return
-                
-                raw_tx = base64.b64decode(swap_data["swapTransaction"])
-                tx = VersionedTransaction.from_bytes(raw_tx)
-                
-                recent_bh = await self.client.get_latest_blockhash()
-                tx.message.recent_blockhash = recent_bh.value.blockhash
-                tx.sign([self.keypair])
-                
-                sig = await self.client.send_raw_transaction(tx.serialize())
-                
-                pnl = (current_price - position["entry_price"]) * position["amount"]
-                
-                self.trade_history.append({
-                    "action": "SELL",
-                    "entry_price": position["entry_price"],
-                    "exit_price": current_price,
-                    "amount": position["amount"],
-                    "profit_loss": pnl,
-                    "tx": sig.value,
-                    "close_reason": reason,
-                    "timestamp": datetime.now().isoformat()
-                })
-                
-                self.active_positions.remove(position)
-                
-                solscan = f"https://solscan.io/tx/{sig.value}?cluster=devnet"
-                
-                await bot.send_message(
-                    self.chat_id,
-                    f"Position Closed ({reason})\n"
-                    f"P&L: {pnl:.4f}\n"
-                    f"[View on Solscan]({solscan})",
-                    parse_mode="Markdown",
-                    reply_markup=main_menu_keyboard()
-                )
-                
-        except Exception as e:
-            logging.error(f"Close position error: {e}")
-
-async def autonomous_loop(chat_id, bot):
+    async def autonomous_loop(chat_id, bot):
     agent = manager.get_agent(chat_id)
     
     await bot.send_message(
@@ -506,4 +441,25 @@ async def autonomous_loop(chat_id, bot):
                         f"Action: {decision['action']}\n"
                         f"Confidence: {decision['confidence']}%\n"
                         f"Reasoning: {decision.get('reasoning', 'N/A')[:100]}...\n"
-                        f"Risk: {decision.get(
+                        f"Risk: {decision.get('risk_assessment', 'N/A')}\n\n"
+                        f"[View on Solscan]({solscan})",
+                        parse_mode="Markdown",
+                        reply_markup=main_menu_keyboard()
+                    )
+                else:
+                    # Trade execution failed
+                    await bot.send_message(
+                        chat_id,
+                        f"AI decided to {decision['action']} but execution failed",
+                        reply_markup=main_menu_keyboard()
+                    )
+            else:
+                logging.info(f"AI decided to WAIT: {decision.get('reasoning', 'No reason')[:50]}...")
+            
+            await agent.check_positions(market_data["current_price"], bot)
+            
+            await asyncio.sleep(60)
+            
+        except Exception as e:
+            logging.error(f"Autonomous loop error: {e}")
+            await asyncio.sleep(60)
