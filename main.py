@@ -500,10 +500,11 @@ async def autonomous_loop(chat_id, bot):
                     sig, details = result
                     solscan = f"https://solscan.io/tx/{sig}?cluster=devnet"
                     
+                    # Fixed: Properly formatted f-string on single line
+                    risk_text = decision.get('risk_assessment', 'N/A')
+                    reason_text = decision.get('reasoning', 'N/A')[:100]
+                    
                     await bot.send_message(
                         chat_id,
                         f"AI AUTONOMOUS TRADE\n\n"
-                        f"Action: {decision['action']}\n"
-                        f"Confidence: {decision['confidence']}%\n"
-                        f"Reasoning: {decision.get('reasoning', 'N/A')[:100]}...\n"
-                        f"Risk: {decision.get(
+                  
