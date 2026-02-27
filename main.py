@@ -1,4 +1,6 @@
 import os
+os.environ['HTTP_PROXY'] = os.environ.get('REPLIT_HTTP_PROXY', '')
+os.environ['HTTPS_PROXY'] = os.environ.get('REPLIT_HTTPS_PROXY', '')
 import asyncio
 import nest_asyncio
 import logging
