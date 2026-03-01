@@ -520,7 +520,7 @@ async def autonomous_loop(chat_id, bot):
             agent.loop_count += 1
             logging.info("AUTONOMOUS LOOP #" + str(agent.loop_count))
 
-                        market_data = await agent.fetch_market_data()
+            market_data = await agent.fetch_market_data()
             if not market_data:
                 logging.error("Failed to fetch market data")
                 await asyncio.sleep(30)
