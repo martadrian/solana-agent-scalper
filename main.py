@@ -28,6 +28,8 @@ from solana.rpc.commitment import Confirmed, Finalized
 from solana.rpc.types import TxOpts
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from aiohttp import web
+
 
 # Configuration
 logging.basicConfig(
