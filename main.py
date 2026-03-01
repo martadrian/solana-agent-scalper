@@ -654,14 +654,21 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def main():
+    # START WEB SERVER FIRST (Required for Render)
+    logging.info(f"DEBUG: Starting web server on port {PORT}")
+    
     app = web.Application()
     app.router.add_get('/', lambda r: web.Response(text="Autonomous Bot Running"))
-
+    
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', PORT).start()
-    logging.info("Web server on port " + str(PORT))
+    
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    
+    logging.info(f"Web server on port {PORT}")
 
+    # THEN START TELEGRAM BOT
     telegram_app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start_handler))
     telegram_app.add_handler(CallbackQueryHandler(button_handler))
@@ -672,8 +679,10 @@ async def main():
 
     logging.info("AUTONOMOUS BOT READY")
 
+    # Keep running
     while True:
         await asyncio.sleep(3600)
+
 
 
 if __name__ == "__main__":
