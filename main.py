@@ -6,6 +6,7 @@ import json
 import base64
 import httpx
 import sys
+import traceback
 from datetime import datetime
 from aiohttp import web
 from solders.keypair import Keypair
@@ -24,6 +25,8 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 PORT = int(os.getenv("PORT", 10000))
 WALLET_SECRET = os.getenv("WALLET_SECRET")
+
+logging.info(f"DEBUG: Starting bot with RPC_URL: {RPC_URL}")
 
 if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
     logging.error("Missing tokens!")
@@ -52,7 +55,9 @@ class AutonomousAgent:
     def __init__(self, chat_id):
         self.chat_id = chat_id
         self.keypair = self._load_or_create_wallet()
+        logging.info(f"DEBUG: Wallet address: {self.keypair.pubkey()}")
         self.client = AsyncClient(RPC_URL, commitment=Confirmed)
+        logging.info(f"DEBUG: AsyncClient created with endpoint: {RPC_URL}")
         self.is_running = False
         self.history = []
         self.active_positions = []
@@ -65,7 +70,8 @@ class AutonomousAgent:
             try:
                 secret_bytes = base64.b64decode(WALLET_SECRET)
                 return Keypair.from_bytes(secret_bytes)
-            except:
+            except Exception as e:
+                logging.error(f"DEBUG: Failed to load wallet: {e}")
                 pass
         kp = Keypair()
         secret = base64.b64encode(bytes(kp)).decode()
@@ -75,9 +81,37 @@ class AutonomousAgent:
 
     async def get_balance(self):
         try:
-            res = await self.client.get_balance(self.keypair.pubkey())
-            return res.value / 1e9
-        except:
+            pubkey = self.keypair.pubkey()
+            logging.info(f"DEBUG: get_balance() called for {pubkey}")
+            
+            # Test if client is connected
+            logging.info(f"DEBUG: Client endpoint: {self.client._provider.endpoint_uri}")
+            
+            res = await self.client.get_balance(pubkey)
+            logging.info(f"DEBUG: RPC response: {res}")
+            logging.info(f"DEBUG: Response type: {type(res)}")
+            
+            if res is None:
+                logging.error("DEBUG: Response is None")
+                return 0.0
+            
+            if hasattr(res, 'value'):
+                balance = res.value / 1e9
+                logging.info(f"DEBUG: Balance calculated: {balance}")
+                return balance
+            elif isinstance(res, dict):
+                # Handle dict response
+                value = res.get('result', {}).get('value', 0)
+                balance = value / 1e9
+                logging.info(f"DEBUG: Balance from dict: {balance}")
+                return balance
+            else:
+                logging.error(f"DEBUG: Unexpected response format: {res}")
+                return 0.0
+                
+        except Exception as e:
+            logging.error(f"DEBUG: get_balance ERROR: {type(e).__name__}: {str(e)}")
+            logging.error(f"DEBUG: Traceback: {traceback.format_exc()}")
             return 0.0
 
     async def fetch_market_data(self):
@@ -486,7 +520,7 @@ async def autonomous_loop(chat_id, bot):
             agent.loop_count += 1
             logging.info("AUTONOMOUS LOOP #" + str(agent.loop_count))
 
-            market_data = await agent.fetch_market_data()
+                        market_data = await agent.fetch_market_data()
             if not market_data:
                 logging.error("Failed to fetch market data")
                 await asyncio.sleep(30)
@@ -644,4 +678,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
- 
