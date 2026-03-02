@@ -1,44 +1,33 @@
-"""
-Autonomous Agentic Wallet System for Solana
-Competition-grade implementation with multi-agent architecture
-"""
-
 import os
 import asyncio
 import json
 import base64
 import logging
 import traceback
+import struct
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 import hashlib
-import secrets
 
 import httpx
 from solders.keypair import Keypair
 from solders.transaction import VersionedTransaction
-from solders.message import MessageV0
-from solders.instruction import Instruction
 from solders.pubkey import Pubkey
-from solders.system_program import TransferParams, transfer
 from solana.rpc.async_api import AsyncClient
-from solana.rpc.commitment import Confirmed, Finalized
+from solana.rpc.commitment import Confirmed
 from solana.rpc.types import TxOpts
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from aiohttp import web
 
-
-# Configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Environment
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
@@ -47,14 +36,13 @@ PORT = int(os.getenv("PORT", "10000"))
 if not TELEGRAM_TOKEN or not OPENROUTER_API_KEY:
     raise ValueError("Missing required environment variables: TELEGRAM_TOKEN, OPENROUTER_API_KEY")
 
-# Constants
 TOKENS = {
     "SOL": "So11111111111111111111111111111111111111112",
     "USDC": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
     "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
 }
 
-JUPITER_API = "https://quote-api.jup.ag/v6"
+ORCA_PROGRAM = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
 MAX_SLIPPAGE_BPS = 100
 MIN_CONFIDENCE = 20
 MAX_POSITION_SIZE_PCT = 50
@@ -79,9 +67,9 @@ class Position:
     tx_signature: Optional[str] = None
     
     def current_pnl(self, current_price: float) -> float:
-        if self.token_in == TOKENS["SOL"]:  # Long SOL
+        if self.token_in == TOKENS["SOL"]:
             return (current_price - self.entry_price) * self.amount
-        else:  # Short SOL (holding USDC)
+        else:
             return (self.entry_price - current_price) * self.amount
 
 
@@ -109,16 +97,12 @@ class MarketState:
 
 
 class SecureKeyManager:
-    """Handles secure key storage and signing operations"""
-    
     def __init__(self):
         self._keys: Dict[int, Keypair] = {}
-        self._key_hashes: Dict[int, str] = {}  # Store hash for verification
+        self._key_hashes: Dict[int, str] = {}
     
     def get_or_create(self, agent_id: int) -> Keypair:
-        """Get existing keypair or create new one"""
         if agent_id not in self._keys:
-            # Check environment for existing key
             env_key = os.getenv(f"AGENT_{agent_id}_KEY")
             
             if env_key:
@@ -132,29 +116,22 @@ class SecureKeyManager:
                 kp = self._generate_new(agent_id)
             
             self._keys[agent_id] = kp
-            # Store hash for integrity checking
             self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
         
         return self._keys[agent_id]
     
     def _generate_new(self, agent_id: int) -> Keypair:
-        """Generate new keypair with cryptographically secure randomness"""
         kp = Keypair()
         secret = base64.b64encode(bytes(kp)).decode()
-        
-        # Log ONLY the public key and instructions to save the private key
         logger.info(f"Generated new wallet for agent {agent_id}: {kp.pubkey()}")
         logger.info(f"IMPORTANT: Set AGENT_{agent_id}_KEY={secret} in environment")
-        
         return kp
     
     def sign_transaction(self, agent_id: int, transaction: VersionedTransaction) -> VersionedTransaction:
-        """Sign transaction with agent's key"""
         kp = self._keys.get(agent_id)
         if not kp:
             raise ValueError(f"No key found for agent {agent_id}")
         
-        # Verify key integrity
         current_hash = hashlib.sha256(bytes(kp)).hexdigest()[:16]
         if current_hash != self._key_hashes.get(agent_id):
             raise SecurityError("Key integrity check failed!")
@@ -171,15 +148,12 @@ class SecurityError(Exception):
 
 
 class SolanaClient:
-    """Robust Solana RPC client with retry logic"""
-    
     def __init__(self, rpc_url: str):
         self.rpc_url = rpc_url
         self.client = AsyncClient(rpc_url, commitment=Confirmed)
         self._request_count = 0
     
     async def get_balance(self, pubkey: Pubkey, retries: int = 3) -> float:
-        """Get SOL balance with retry logic"""
         for attempt in range(retries):
             try:
                 resp = await self.client.get_balance(pubkey)
@@ -188,32 +162,28 @@ class SolanaClient:
             except Exception as e:
                 logger.warning(f"Balance fetch attempt {attempt + 1} failed: {e}")
                 if attempt < retries - 1:
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    await asyncio.sleep(2 ** attempt)
         
         raise ConnectionError(f"Failed to fetch balance after {retries} attempts")
     
     async def get_token_balance(self, owner: Pubkey, mint: Pubkey) -> float:
-        """Get SPL token balance"""
         try:
-            from spl.token.async_client import AsyncToken
-            from spl.token.constants import TOKEN_PROGRAM_ID
-            
-            # Get associated token account
             resp = await self.client.get_token_accounts_by_owner(
                 owner,
-                {"mint": str(mint)},
-                encoding="jsonParsed"
+                {"mint": str(mint)}
             )
             
             if not resp.value:
                 return 0.0
             
-            # Sum all token accounts (usually just one)
             total = 0
             for account in resp.value:
-                amount = account.account.data.parsed['info']['tokenAmount']['uiAmount']
-                if amount:
-                    total += amount
+                try:
+                    amount = int(account.account.data.parsed['info']['tokenAmount']['amount'])
+                    decimals = int(account.account.data.parsed['info']['tokenAmount']['decimals'])
+                    total += amount / (10 ** decimals)
+                except:
+                    pass
             
             return total
         except Exception as e:
@@ -221,7 +191,6 @@ class SolanaClient:
             return 0.0
     
     async def simulate_transaction(self, tx: VersionedTransaction) -> bool:
-        """Simulate transaction before sending"""
         try:
             result = await self.client.simulate_transaction(tx)
             if result.value.err:
@@ -233,87 +202,94 @@ class SolanaClient:
             return False
     
     async def send_transaction(self, tx: VersionedTransaction, opts: TxOpts = None) -> str:
-        """Send transaction with confirmation"""
         if opts is None:
             opts = TxOpts(skip_preflight=False, preflight_commitment=Confirmed)
         
         sig = await self.client.send_raw_transaction(tx.serialize(), opts=opts)
-        
-        # Wait for confirmation
         await self.client.confirm_transaction(sig.value, commitment=Confirmed)
-        
         return sig.value
     
     async def get_latest_blockhash(self):
-        """Get recent blockhash"""
         resp = await self.client.get_latest_blockhash()
         return resp.value.blockhash
 
 
-class JupiterDEX:
-    """Jupiter DEX integration for optimal routing"""
-    
+class OrcaDEX:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=30.0)
-        self.base_url = JUPITER_API
+        self.base_url = "https://api.mainnet.orca.so/v1"
+        self.program_id = ORCA_PROGRAM
     
-    async def get_quote(
-        self,
-        input_mint: str,
-        output_mint: str,
-        amount: int,
-        slippage_bps: int = MAX_SLIPPAGE_BPS
-    ) -> Optional[Dict]:
-        """Get swap quote from Jupiter"""
-        params = {
-            "inputMint": input_mint,
-            "outputMint": output_mint,
-            "amount": str(amount),
-            "slippageBps": str(slippage_bps),
-            "onlyDirectRoutes": "false",
-            "asLegacyTransaction": "false"
-        }
-        
+    async def find_best_pool(self, token_a: str, token_b: str) -> Optional[Dict]:
         try:
-            resp = await self.client.get(f"{self.base_url}/quote", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            
-            if "error" in data:
-                logger.error(f"Jupiter quote error: {data['error']}")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getProgramAccounts",
+                    "params": [
+                        self.program_id,
+                        {
+                            "encoding": "base64",
+                            "filters": [{"dataSize": 653}]
+                        }
+                    ]
+                }
+                
+                resp = await client.post(RPC_URL, json=payload)
+                result = resp.json()
+                
+                pools = result.get("result", [])
+                
+                for pool in pools:
+                    data = base64.b64decode(pool["account"]["data"][0])
+                    
+                    mint_a = data[65:97]
+                    mint_b = data[97:129]
+                    
+                    mint_a_addr = base64.b64encode(mint_a).decode()
+                    mint_b_addr = base64.b64encode(mint_b).decode()
+                    
+                    if (mint_a_addr == token_a and mint_b_addr == token_b) or \
+                       (mint_a_addr == token_b and mint_b_addr == token_a):
+                        
+                        sqrt_price_x64 = struct.unpack("<Q", data[193:201])[0]
+                        liquidity = struct.unpack("<Q", data[145:153])[0]
+                        
+                        price = (sqrt_price_x64 / (2**64)) ** 2
+                        
+                        return {
+                            "address": pool["pubkey"],
+                            "token_a": mint_a_addr,
+                            "token_b": mint_b_addr,
+                            "price": price,
+                            "liquidity": liquidity
+                        }
+                
                 return None
-            
-            return data
+                
         except Exception as e:
-            logger.error(f"Quote fetch error: {e}")
+            logger.error(f"Find pool error: {e}")
             return None
     
-    async def get_swap_transaction(
-        self,
-        quote: Dict,
-        user_pubkey: str,
-        wrap_unwrap_sol: bool = True
-    ) -> Optional[str]:
-        """Get serialized swap transaction"""
-        payload = {
-            "quoteResponse": quote,
-            "userPublicKey": user_pubkey,
-            "wrapAndUnwrapSOL": wrap_unwrap_sol,
-            "computeUnitPriceMicroLamports": 50000  # Priority fee for faster execution
-        }
-        
+    async def get_price_from_pyth(self) -> Optional[float]:
         try:
-            resp = await self.client.post(f"{self.base_url}/swap", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+            PYTH_SOL_FEED_ID = "0xef0d8b6fda2ceba41da15d4095d1da392a0d2f8ed0c6c7bc0f4cfac8c280b56d"
             
-            if "swapTransaction" not in data:
-                logger.error(f"No swap transaction in response: {data}")
-                return None
-            
-            return data["swapTransaction"]
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"https://hermes.pyth.network/api/latest_price_feeds?ids[]={PYTH_SOL_FEED_ID}"
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if data and len(data) > 0:
+                    price_data = data[0]["price"]
+                    price = float(price_data["price"]) * (10 ** price_data["expo"])
+                    return price
+                    
         except Exception as e:
-            logger.error(f"Swap transaction error: {e}")
+            logger.error(f"Pyth price error: {e}")
             return None
     
     async def close(self):
@@ -321,17 +297,13 @@ class JupiterDEX:
 
 
 class AIOracle:
-    """AI decision engine using OpenRouter"""
-    
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=60.0)
         self.base_url = "https://openrouter.ai/api/v1"
-        self.model = "anthropic/claude-3.5-sonnet"  # Better reasoning for trading
+        self.model = "anthropic/claude-3.5-sonnet"
     
     async def analyze_market(self, market_state: MarketState, context: Dict) -> TradeDecision:
-        """Get AI trading decision based on market state"""
-        
         system_prompt = """You are an elite autonomous crypto trading AI operating on Solana. 
 Your goal is to maximize returns while managing risk. You have full autonomy to:
 - Open long/short positions
@@ -396,7 +368,7 @@ Respond with this exact JSON structure:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": 0.3,  # Lower for more consistent decisions
+                    "temperature": 0.3,
                     "max_tokens": 800,
                     "response_format": {"type": "json_object"}
                 }
@@ -406,14 +378,11 @@ Respond with this exact JSON structure:
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
             
-            # Parse JSON response
             decision_data = json.loads(content)
             
-            # Validate and construct decision
             action = ActionType(decision_data.get("action", "WAIT"))
             confidence = min(100, max(0, int(decision_data.get("confidence", 0))))
             
-            # Enforce minimum confidence
             if confidence < MIN_CONFIDENCE and action != ActionType.WAIT:
                 action = ActionType.WAIT
                 decision_data["reasoning"] += f" (Confidence {confidence}% below threshold {MIN_CONFIDENCE}%)"
@@ -434,7 +403,6 @@ Respond with this exact JSON structure:
             
         except Exception as e:
             logger.error(f"AI decision error: {e}")
-            # Fail safe: wait if AI fails
             return TradeDecision(
                 action=ActionType.WAIT,
                 confidence=0,
@@ -448,22 +416,16 @@ Respond with this exact JSON structure:
 
 
 class AgenticWallet:
-    """
-    Core agentic wallet - autonomous economic agent with full wallet control
-    """
-    
     def __init__(self, agent_id: int, chat_id: int):
         self.agent_id = agent_id
         self.chat_id = chat_id
         self.created_at = datetime.now()
         
-        # Components
         self.key_manager = SecureKeyManager()
         self.solana = SolanaClient(RPC_URL)
-        self.jupiter = JupiterDEX()
+        self.orca = OrcaDEX()
         self.ai = AIOracle(OPENROUTER_API_KEY)
         
-        # State
         self.positions: List[Position] = []
         self.trade_history: List[Dict] = []
         self.price_history: List[Dict] = []
@@ -471,7 +433,6 @@ class AgenticWallet:
         self.loop_count = 0
         self.last_action_time = None
         
-        # Performance tracking
         self.total_pnl = 0.0
         self.win_count = 0
         self.loss_count = 0
@@ -487,44 +448,29 @@ class AgenticWallet:
         return str(self.pubkey)
     
     async def get_balance(self) -> float:
-        """Get wallet SOL balance"""
         return await self.solana.get_balance(self.pubkey)
     
     async def get_usdc_balance(self) -> float:
-        """Get wallet USDC balance"""
         mint = Pubkey.from_string(TOKENS["USDC"])
         return await self.solana.get_token_balance(self.pubkey, mint)
     
     async def fetch_market_data(self) -> Optional[MarketState]:
-        """Fetch current market state from Jupiter"""
         try:
-            # Get SOL/USDC price (using small amount for quote)
-            quote = await self.jupiter.get_quote(
-                TOKENS["SOL"],
-                TOKENS["USDC"],
-                int(0.01 * 1e9)  # 0.01 SOL
-            )
+            current_price = await self.orca.get_price_from_pyth()
             
-            if not quote:
+            if not current_price:
                 return None
             
-            # Extract price from quote
-            out_amount = int(quote["outAmount"])
-            current_price = out_amount / 1e6  # USDC has 6 decimals
-            
-            # Update price history
             self.price_history.append({
                 "timestamp": datetime.now().isoformat(),
                 "price": current_price
             })
             
-            # Keep last 100 prices
             if len(self.price_history) > 100:
                 self.price_history.pop(0)
             
             prices = [p["price"] for p in self.price_history]
             
-            # Calculate metrics
             volatility = self._calculate_volatility(prices)
             trend = self._detect_trend(prices)
             
@@ -540,7 +486,6 @@ class AgenticWallet:
             return None
     
     def _calculate_volatility(self, prices: List[float]) -> float:
-        """Calculate realized volatility"""
         if len(prices) < 2:
             return 0.0
         
@@ -553,7 +498,6 @@ class AgenticWallet:
         return variance ** 0.5
     
     def _detect_trend(self, prices: List[float]) -> str:
-        """Detect market trend using simple moving averages"""
         if len(prices) < 20:
             return "INSUFFICIENT_DATA"
         
@@ -568,14 +512,13 @@ class AgenticWallet:
             return "SIDEWAYS"
     
     def _get_context(self) -> Dict:
-        """Build context for AI decision"""
         unrealized = sum(
             pos.current_pnl(self.price_history[-1]["price"] if self.price_history else 0)
             for pos in self.positions
         )
         
         return {
-            "balance": self.get_balance(),  # Note: This is async, should be awaited in caller
+            "balance": self.get_balance(),
             "positions": self.positions,
             "unrealized_pnl": unrealized,
             "performance": {
@@ -587,8 +530,6 @@ class AgenticWallet:
         }
     
     async def execute_decision(self, decision: TradeDecision, market: MarketState) -> Optional[str]:
-        """Execute trade decision"""
-        
         if decision.action == ActionType.WAIT:
             logger.info(f"Agent {self.agent_id}: WAIT - {decision.reasoning[:50]}")
             return None
@@ -605,149 +546,95 @@ class AgenticWallet:
         return None
     
     async def _open_long(self, decision: TradeDecision, market: MarketState) -> Optional[str]:
-        """Open long SOL position"""
         try:
             balance = await self.get_balance()
             amount_sol = balance * (decision.amount_percent / 100)
-            amount_sol = min(amount_sol, balance * 0.95)  # Keep some for fees
-            amount_sol = max(amount_sol, 0.001)  # Minimum trade size
+            amount_sol = min(amount_sol, balance * 0.95)
+            amount_sol = max(amount_sol, 0.001)
             
             if amount_sol < 0.001:
                 logger.warning("Insufficient balance for trade")
                 return None
             
-            usdc_balance = await self.get_usdc_balance()
-            if usdc_balance > 0:
-                # Swap USDC to SOL to increase long exposure
-                quote = await self.jupiter.get_quote(
-                    TOKENS["USDC"],
-                    TOKENS["SOL"],
-                    int(usdc_balance * 0.5 * 1e6)  # Use 50% of USDC
-                )
-                
-                if not quote:
-                    return None
-                
-                sig = await self._execute_swap(quote)
-                
-                if sig:
-                    # Record position
-                    position = Position(
-                        entry_price=market.current_price,
-                        amount=usdc_balance * 0.5 / market.current_price,
-                        token_in=TOKENS["USDC"],
-                        token_out=TOKENS["SOL"],
-                        take_profit=market.current_price * (1 + decision.take_profit_pct / 100),
-                        stop_loss=market.current_price * (1 - decision.stop_loss_pct / 100),
-                        tx_signature=sig
-                    )
-                    self.positions.append(position)
-                    
-                    self._record_trade("BUY", market.current_price, amount_sol, sig, decision)
-                    
-                    return sig
+            simulated_sig = f"SIMULATED_BUY_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.agent_id}"
             
-            logger.info("Already holding SOL, no swap needed")
-            return None
+            position = Position(
+                entry_price=market.current_price,
+                amount=amount_sol,
+                token_in=TOKENS["USDC"],
+                token_out=TOKENS["SOL"],
+                take_profit=market.current_price * (1 + decision.take_profit_pct / 100),
+                stop_loss=market.current_price * (1 - decision.stop_loss_pct / 100),
+                tx_signature=simulated_sig
+            )
+            self.positions.append(position)
+            
+            self._record_trade("BUY", market.current_price, amount_sol, simulated_sig, decision)
+            
+            logger.info(f"Simulated BUY: {amount_sol} SOL at {market.current_price}")
+            return simulated_sig
             
         except Exception as e:
             logger.error(f"Open long error: {e}")
             return None
     
     async def _close_position(self, decision: TradeDecision, market: MarketState) -> Optional[str]:
-        """Close existing position"""
         if not self.positions:
             logger.info("No positions to close")
             return None
         
-        # Close first position (FIFO)
         position = self.positions[0]
         
         try:
-            # Swap SOL to USDC
-            quote = await self.jupiter.get_quote(
-                TOKENS["SOL"],
-                TOKENS["USDC"],
-                int(position.amount * 1e9)
-            )
+            simulated_sig = f"SIMULATED_SELL_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.agent_id}"
             
-            if not quote:
-                return None
+            pnl = position.current_pnl(market.current_price)
+            self.total_pnl += pnl
             
-            sig = await self._execute_swap(quote)
+            if pnl > 0:
+                self.win_count += 1
+            else:
+                self.loss_count += 1
             
-            if sig:
-                # Calculate PnL
-                pnl = position.current_pnl(market.current_price)
-                self.total_pnl += pnl
-                
-                if pnl > 0:
-                    self.win_count += 1
-                else:
-                    self.loss_count += 1
-                
-                self._record_trade("SELL", market.current_price, position.amount, sig, decision, pnl)
-                self.positions.remove(position)
-                
-                return sig
+            self._record_trade("SELL", market.current_price, position.amount, simulated_sig, decision, pnl)
+            self.positions.remove(position)
+            
+            logger.info(f"Simulated SELL: P&L {pnl}")
+            return simulated_sig
             
         except Exception as e:
             logger.error(f"Close position error: {e}")
             return None
     
     async def _emergency_exit(self, market: MarketState) -> Optional[str]:
-        """Emergency close all positions"""
         logger.warning(f"AGENT {self.agent_id}: EMERGENCY EXIT TRIGGERED")
         
         signatures = []
         for position in list(self.positions):
-            quote = await self.jupiter.get_quote(
-                TOKENS["SOL"],
-                TOKENS["USDC"],
-                int(position.amount * 1e9)
-            )
+            simulated_sig = f"SIMULATED_EMERGENCY_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.agent_id}"
             
-            if quote:
-                sig = await self._execute_swap(quote)
-                if sig:
-                    signatures.append(sig)
-                    self.positions.remove(position)
+            pnl = position.current_pnl(market.current_price)
+            self.total_pnl += pnl
+            
+            if pnl > 0:
+                self.win_count += 1
+            else:
+                self.loss_count += 1
+            
+            self.trade_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "action": "SELL",
+                "price": market.current_price,
+                "amount": position.amount,
+                "tx_signature": simulated_sig,
+                "close_reason": "EMERGENCY_EXIT",
+                "pnl": pnl
+            })
+            
+            self.positions.remove(position)
+            signatures.append(simulated_sig)
         
         return signatures[0] if signatures else None
-    
-    async def _execute_swap(self, quote: Dict) -> Optional[str]:
-        """Execute Jupiter swap"""
-        try:
-            # Get swap transaction
-            swap_tx = await self.jupiter.get_swap_transaction(quote, str(self.pubkey))
-            if not swap_tx:
-                return None
-            
-            # Deserialize
-            raw_tx = base64.b64decode(swap_tx)
-            tx = VersionedTransaction.from_bytes(raw_tx)
-            
-            # Get fresh blockhash
-            blockhash = await self.solana.get_latest_blockhash()
-            tx.message.recent_blockhash = blockhash
-            
-            # Sign
-            tx = self.key_manager.sign_transaction(self.agent_id, tx)
-            
-            # Simulate first
-            if not await self.solana.simulate_transaction(tx):
-                logger.error("Transaction simulation failed")
-                return None
-            
-            # Send
-            sig = await self.solana.send_transaction(tx)
-            logger.info(f"Swap executed: {sig}")
-            
-            return sig
-            
-        except Exception as e:
-            logger.error(f"Swap execution error: {e}")
-            return None
     
     def _record_trade(
         self,
@@ -758,7 +645,6 @@ class AgenticWallet:
         decision: TradeDecision,
         pnl: Optional[float] = None
     ):
-        """Record trade in history"""
         trade = {
             "timestamp": datetime.now().isoformat(),
             "action": action,
@@ -773,26 +659,21 @@ class AgenticWallet:
         self.trade_history.append(trade)
         self.last_action_time = datetime.now()
         
-        # Keep last 100 trades
         if len(self.trade_history) > 100:
             self.trade_history.pop(0)
     
     async def check_positions(self, market: MarketState) -> List[str]:
-        """Check and manage existing positions (TP/SL)"""
         closed = []
         
         for position in list(self.positions):
-            current_pnl = position.current_pnl(market.current_price)
             current_price = market.current_price
             
-            # Check take profit
             if current_price >= position.take_profit:
                 logger.info(f"Take profit hit: {current_price} >= {position.take_profit}")
                 sig = await self._close_position_at_price(position, current_price, "TAKE_PROFIT")
                 if sig:
                     closed.append(sig)
             
-            # Check stop loss
             elif current_price <= position.stop_loss:
                 logger.info(f"Stop loss hit: {current_price} <= {position.stop_loss}")
                 sig = await self._close_position_at_price(position, current_price, "STOP_LOSS")
@@ -802,47 +683,35 @@ class AgenticWallet:
         return closed
     
     async def _close_position_at_price(self, position: Position, price: float, reason: str) -> Optional[str]:
-        """Close specific position"""
         try:
-            quote = await self.jupiter.get_quote(
-                TOKENS["SOL"],
-                TOKENS["USDC"],
-                int(position.amount * 1e9)
-            )
+            simulated_sig = f"SIMULATED_{reason}_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.agent_id}"
             
-            if not quote:
-                return None
+            pnl = position.current_pnl(price)
+            self.total_pnl += pnl
             
-            sig = await self._execute_swap(quote)
+            if pnl > 0:
+                self.win_count += 1
+            else:
+                self.loss_count += 1
             
-            if sig:
-                pnl = position.current_pnl(price)
-                self.total_pnl += pnl
-                
-                if pnl > 0:
-                    self.win_count += 1
-                else:
-                    self.loss_count += 1
-                
-                self.trade_history.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "action": "SELL",
-                    "price": price,
-                    "amount": position.amount,
-                    "tx_signature": sig,
-                    "close_reason": reason,
-                    "pnl": pnl
-                })
-                
-                self.positions.remove(position)
-                return sig
-                
+            self.trade_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "action": "SELL",
+                "price": price,
+                "amount": position.amount,
+                "tx_signature": simulated_sig,
+                "close_reason": reason,
+                "pnl": pnl
+            })
+            
+            self.positions.remove(position)
+            return simulated_sig
+            
         except Exception as e:
             logger.error(f"Close position error: {e}")
             return None
     
     async def run_autonomous_loop(self, bot=None):
-        """Main autonomous operation loop"""
         self.is_running = True
         
         while self.is_running:
@@ -850,26 +719,22 @@ class AgenticWallet:
                 self.loop_count += 1
                 logger.info(f"Agent {self.agent_id}: Loop {self.loop_count}")
                 
-                # 1. Fetch market data
                 market = await self.fetch_market_data()
                 if not market:
                     logger.error("Failed to fetch market data")
                     await asyncio.sleep(60)
                     continue
                 
-                # 2. Check existing positions first
                 closed = await self.check_positions(market)
                 if closed and bot:
                     for sig in closed:
                         await self._notify_trade(bot, f"Position closed (TP/SL): {sig[:20]}...")
                 
-                # 3. Build context and get AI decision
                 context = self._get_context()
                 context['balance'] = await self.get_balance()
                 
                 decision = await self.ai.analyze_market(market, context)
                 
-                # 4. Execute decision
                 sig = await self.execute_decision(decision, market)
                 
                 if sig and bot:
@@ -880,7 +745,6 @@ class AgenticWallet:
                         f"Reason: {decision.reasoning[:100]}..."
                     )
                 
-                # 5. Wait before next iteration
                 await asyncio.sleep(60)
                 
             except Exception as e:
@@ -889,7 +753,6 @@ class AgenticWallet:
                 await asyncio.sleep(60)
     
     async def _notify_trade(self, bot, message: str):
-        """Send notification via Telegram"""
         try:
             await bot.send_message(
                 self.chat_id,
@@ -900,11 +763,9 @@ class AgenticWallet:
             logger.error(f"Notification error: {e}")
     
     def stop(self):
-        """Stop autonomous operation"""
         self.is_running = False
     
     def get_status(self) -> Dict:
-        """Get current agent status"""
         return {
             "agent_id": self.agent_id,
             "address": self.address,
@@ -920,17 +781,12 @@ class AgenticWallet:
 
 
 class MultiAgentSwarm:
-    """
-    Manages multiple autonomous agents for scalability demonstration
-    """
-    
     def __init__(self):
         self.agents: Dict[int, AgenticWallet] = {}
         self.tasks: Dict[int, asyncio.Task] = {}
         self.next_id = 1
     
     def create_agent(self, chat_id: int) -> AgenticWallet:
-        """Create new autonomous agent"""
         agent_id = self.next_id
         self.next_id += 1
         
@@ -939,7 +795,6 @@ class MultiAgentSwarm:
         return agent
     
     def get_agent(self, chat_id: int) -> Optional[AgenticWallet]:
-        """Get or create agent for chat"""
         for agent in self.agents.values():
             if agent.chat_id == chat_id:
                 return agent
@@ -947,7 +802,6 @@ class MultiAgentSwarm:
         return self.create_agent(chat_id)
     
     def start_agent(self, agent_id: int, bot=None) -> bool:
-        """Start autonomous loop for agent"""
         if agent_id not in self.agents:
             return False
         
@@ -960,7 +814,6 @@ class MultiAgentSwarm:
         return True
     
     def stop_agent(self, agent_id: int) -> bool:
-        """Stop agent"""
         if agent_id not in self.agents:
             return False
         
@@ -974,15 +827,12 @@ class MultiAgentSwarm:
         return True
     
     def get_all_status(self) -> List[Dict]:
-        """Get status of all agents"""
         return [agent.get_status() for agent in self.agents.values()]
 
 
-# Global swarm instance
 swarm = MultiAgentSwarm()
 
 
-# Telegram UI
 def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 Start Agent", callback_data="start_agent"),
@@ -995,7 +845,6 @@ def main_menu():
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command"""
     welcome = """🤖 *Autonomous Agentic Wallet*
 
 I am an AI agent with full control over my own Solana wallet. I can:
@@ -1012,7 +861,6 @@ Click "Start Agent" to activate me."""
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button callbacks"""
     query = update.callback_query
     await query.answer()
     
@@ -1087,12 +935,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += (
                     f"{emoji} *{trade['action']}* at `${trade['price']:.4f}`\n"
                     f"PnL: `${trade.get('pnl', 0):.2f}` | Conf: `{trade.get('ai_confidence', 0)}%`\n"
-                    f"[Tx](https://solscan.io/tx/{trade['tx_signature']}?cluster=devnet)\n\n"
+                    f"Tx: `{trade['tx_signature'][:20]}...`\n\n"
                 )
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
 
 
-# Web server for health checks
 async def health_check(request):
     return web.Response(text=json.dumps({
         "status": "healthy",
@@ -1102,8 +949,6 @@ async def health_check(request):
 
 
 async def main():
-    """Main entry point"""
-    # Setup web server (for Render.com)
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_get("/health", health_check)
@@ -1114,7 +959,6 @@ async def main():
     await site.start()
     logger.info(f"Web server started on port {PORT}")
     
-    # Setup Telegram bot
     telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CallbackQueryHandler(button_handler))
@@ -1125,7 +969,6 @@ async def main():
     
     logger.info("Autonomous Agentic Wallet System Ready")
     
-    # Keep running
     while True:
         await asyncio.sleep(3600)
 
