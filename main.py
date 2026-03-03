@@ -1342,4 +1342,336 @@ class AgenticWallet:
                     await asyncio.sleep(60)
                     continue
                 
-                logger.info(f"📊 Price: {market.current_price:.10f} | Trend
+                logger.info(f"📊 Price: {market.current_price:.10f} | Trend: {market.trend} | Vol: {market.volatility:.4f}")
+                
+                # 2. Check existing positions (TP/SL)
+                closed = await self.check_positions(market)
+                if closed:
+                    for sig in closed:
+                        logger.info(f"📋 Position closed: {sig[:20]}...")
+                        if bot:
+                            await self._notify_trade(bot, f"Position closed (TP/SL): `{sig[:20]}...`")
+                
+                # 3. Get AI decision
+                context = await self._get_context()
+                decision = await self.ai.analyze_market(market, context)
+                
+                logger.info(f"🤖 AI Decision: {decision.action.value} (confidence: {decision.confidence}%)")
+                logger.info(f"📝 Reasoning: {decision.reasoning[:80]}...")
+                
+                # 4. Execute decision
+                sig = await self.execute_decision(decision, market)
+                
+                if sig:
+                    action_str = "🟢 BUY" if decision.action == ActionType.BUY else "🔴 SELL"
+                    logger.info(f"{action_str} EXECUTED: {sig}")
+                    if bot:
+                        await self._notify_trade(
+                            bot,
+                            f"{action_str} Executed\n"
+                            f"Confidence: {decision.confidence}%\n"
+                            f"Amount: {decision.amount_percent}%\n"
+                            f"Tx: `{sig[:30]}...`"
+                        )
+                else:
+                    if decision.action != ActionType.WAIT:
+                        logger.warning(f"Failed to execute {decision.action.value}")
+                
+                # 5. Status update
+                logger.info(f"💰 Balance: {await self.get_balance():.4f} SOL")
+                logger.info(f"📈 Positions: {len(self.positions)} | PnL: {self.total_pnl:.6f}")
+                
+                # 6. Wait before next iteration
+                logger.info(f"⏳ Waiting 60 seconds...")
+                await asyncio.sleep(60)
+                
+            except Exception as e:
+                logger.error(f"Autonomous loop error: {e}")
+                logger.error(traceback.format_exc())
+                await asyncio.sleep(60)
+        
+        logger.info(f"Agent {self.agent_id} stopped")
+    
+    async def _notify_trade(self, bot, message: str):
+        """Send Telegram notification"""
+        try:
+            await bot.send_message(
+                self.chat_id,
+                f"🤖 *Agent {self.agent_id}*\n{message}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error(f"Notification error: {e}")
+    
+    def stop(self):
+        """Stop autonomous operation"""
+        self.is_running = False
+    
+    def get_status(self) -> Dict:
+        """Get agent status"""
+        total_trades = self.win_count + self.loss_count
+        return {
+            "agent_id": self.agent_id,
+            "address": self.address,
+            "is_running": self.is_running,
+            "loop_count": self.loop_count,
+            "positions_count": len(self.positions),
+            "total_pnl": self.total_pnl,
+            "win_rate": self.win_count / total_trades if total_trades > 0 else 0,
+            "total_trades": len(self.trade_history),
+            "created_at": self.created_at.isoformat()
+        }
+
+
+class MultiAgentSwarm:
+    """Manages multiple autonomous agents"""
+    
+    def __init__(self):
+        self.agents: Dict[int, AgenticWallet] = {}
+        self.tasks: Dict[int, asyncio.Task] = {}
+        self.next_id = 1
+    
+    def create_agent(self, chat_id: int) -> AgenticWallet:
+        """Create new agent"""
+        agent_id = self.next_id
+        self.next_id += 1
+        
+        agent = AgenticWallet(agent_id, chat_id)
+        self.agents[agent_id] = agent
+        return agent
+    
+    def get_agent(self, chat_id: int) -> Optional[AgenticWallet]:
+        """Get or create agent for chat"""
+        for agent in self.agents.values():
+            if agent.chat_id == chat_id:
+                return agent
+        return self.create_agent(chat_id)
+    
+    def start_agent(self, agent_id: int, bot=None) -> bool:
+        """Start agent"""
+        if agent_id not in self.agents:
+            return False
+        
+        agent = self.agents[agent_id]
+        if agent.is_running:
+            return False
+        
+        task = asyncio.create_task(agent.run_autonomous_loop(bot))
+        self.tasks[agent_id] = task
+        return True
+    
+    def stop_agent(self, agent_id: int) -> bool:
+        """Stop agent"""
+        if agent_id not in self.agents:
+            return False
+        
+        agent = self.agents[agent_id]
+        agent.stop()
+        
+        if agent_id in self.tasks:
+            self.tasks[agent_id].cancel()
+            del self.tasks[agent_id]
+        
+        return True
+    
+    def get_all_status(self) -> List[Dict]:
+        """Get all agents status"""
+        return [agent.get_status() for agent in self.agents.values()]
+
+
+# Global swarm
+swarm = MultiAgentSwarm()
+
+
+# Telegram UI
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Start Agent", callback_data="start_agent"),
+         InlineKeyboardButton("🛑 Stop Agent", callback_data="stop_agent")],
+        [InlineKeyboardButton("💰 Wallet", callback_data="wallet"),
+         InlineKeyboardButton("📊 Status", callback_data="status")],
+        [InlineKeyboardButton("📈 Positions", callback_data="positions"),
+         InlineKeyboardButton("📜 History", callback_data="history")],
+        [InlineKeyboardButton("💧 Airdrop", callback_data="airdrop")]
+    ])
+
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start"""
+    welcome = """🤖 *Autonomous Agentic Wallet*
+
+I am an AI agent with full control over my Solana wallet. I can:
+• Analyze markets using Orca DEX data
+• Execute *REAL* trades on devnet
+• Manage risk and positions autonomously
+• Learn from trading history
+
+*⚠️ Real Transactions:* All trades are executed on Solana devnet and recorded on-chain
+
+Click "Start Agent" to activate autonomous trading."""
+    
+    await update.message.reply_text(welcome, parse_mode="Markdown", reply_markup=main_menu())
+
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle button clicks"""
+    query = update.callback_query
+    await query.answer()
+    
+    chat_id = query.message.chat_id
+    agent = swarm.get_agent(chat_id)
+    
+    if query.data == "start_agent":
+        # Initialize agent first
+        success = await agent.initialize()
+        
+        if not success:
+            await query.edit_message_text(
+                "❌ *Initialization Failed*\n\n"
+                "Could not load Orca pools. Please check:\n"
+                "• RPC connection\n"
+                "• Pool addresses\n"
+                "• Network status",
+                parse_mode="Markdown",
+                reply_markup=main_menu()
+            )
+            return
+        
+        if swarm.start_agent(agent.agent_id, context.bot):
+            await query.edit_message_text(
+                f"🟢 *Agent {agent.agent_id} Activated!*\n\n"
+                f"💳 Address: `{agent.address}`\n\n"
+                f"⚠️ *Executing real transactions on devnet*\n\n"
+                f"Fund this wallet with devnet SOL:\n"
+                f"https://faucet.solana.com/\n\n"
+                f"[View on Solscan](https://solscan.io/account/{agent.address}?cluster=devnet)",
+                parse_mode="Markdown",
+                reply_markup=main_menu()
+            )
+        else:
+            await query.edit_message_text("Already running!", reply_markup=main_menu())
+    
+    elif query.data == "stop_agent":
+        if swarm.stop_agent(agent.agent_id):
+            await query.edit_message_text("🛑 Agent stopped.", reply_markup=main_menu())
+        else:
+            await query.edit_message_text("Not running.", reply_markup=main_menu())
+    
+    elif query.data == "wallet":
+        balance = await agent.get_balance()
+        text = (
+            f"💳 *Wallet Info*\n\n"
+            f"Address: `{agent.address}`\n"
+            f"Balance: `{balance:.4f}` SOL\n\n"
+            f"[View on Solscan](https://solscan.io/account/{agent.address}?cluster=devnet)"
+        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
+    
+    elif query.data == "status":
+        status = agent.get_status()
+        text = (
+            f"📊 *Agent Status*\n\n"
+            f"ID: `{status['agent_id']}`\n"
+            f"Status: {'🟢 Running' if status['is_running'] else '🔴 Stopped'}\n"
+            f"Loops: `{status['loop_count']}`\n"
+            f"Positions: `{status['positions_count']}`\n"
+            f"Total PnL: `{status['total_pnl']:.6f}`\n"
+            f"Win Rate: `{status['win_rate']*100:.1f}%`\n"
+            f"Trades: `{status['total_trades']}`"
+        )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
+    
+    elif query.data == "positions":
+        if not agent.positions:
+            text = "No active positions."
+        else:
+            text = "📈 *Active Positions*\n\n"
+            for i, pos in enumerate(agent.positions, 1):
+                text += (
+                    f"*{i}. Position*\n"
+                    f"Entry: `{pos.entry_price:.10f}`\n"
+                    f"Amount: `{pos.amount:.6f}`\n"
+                    f"TP: `{pos.take_profit:.10f}` | SL: `{pos.stop_loss:.10f}`\n"
+                    f"[Tx](https://solscan.io/tx/{pos.tx_signature}?cluster=devnet)\n\n"
+                )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
+    
+    elif query.data == "history":
+        if not agent.trade_history:
+            text = "No trades yet."
+        else:
+            text = "📜 *Recent Trades*\n\n"
+            for trade in agent.trade_history[-5:]:
+                emoji = "🟢" if trade.get('pnl', 0) > 0 else "🔴" if trade.get('pnl', 0) < 0 else "⚪"
+                text += (
+                    f"{emoji} *{trade['action']}* at `{trade['price']:.10f}`\n"
+                    f"PnL: `{trade.get('pnl', 0):.6f}` | Conf: `{trade.get('ai_confidence', 0)}%`\n"
+                    f"[Tx](https://solscan.io/tx/{trade['tx_signature']}?cluster=devnet)\n\n"
+                )
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
+    
+    elif query.data == "airdrop":
+        sig = await agent.request_airdrop(2.0)
+        if sig:
+            text = f"✅ Airdrop requested!\nTx: `{sig[:30]}...`"
+        else:
+            text = "❌ Airdrop failed. Try manually at https://faucet.solana.com/"
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
+
+
+# Web server for health checks
+async def health_check(request):
+    return web.Response(text=json.dumps({
+        "status": "healthy",
+        "agents": len(swarm.agents),
+        "running": sum(1 for a in swarm.agents.values() if a.is_running)
+    }), content_type="application/json")
+
+
+async def agent_status_api(request):
+    """API endpoint for agent status"""
+    return web.Response(text=json.dumps({
+        "agents": swarm.get_all_status()
+    }), content_type="application/json")
+
+
+async def main():
+    """Main entry point"""
+    # Setup web server
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    app.router.add_get("/api/agents", agent_status_api)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"✓ Web server started on port {PORT}")
+    
+    # Setup Telegram bot (if token available)
+    if TELEGRAM_TOKEN:
+        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
+        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(CallbackQueryHandler(button_handler))
+        
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.updater.start_polling(drop_pending_updates=True)
+        logger.info("✓ Telegram bot started")
+    else:
+        logger.info("⚠ No Telegram token - running in API-only mode")
+    
+    logger.info("=" * 60)
+    logger.info("🚀 AUTONOMOUS AGENTIC WALLET SYSTEM READY")
+    logger.info("⚠️  EXECUTING REAL TRANSACTIONS ON SOLANA DEVNET")
+    logger.info("=" * 60)
+    
+    # Keep running
+    while True:
+        await asyncio.sleep(3600)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
