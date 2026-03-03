@@ -1,9 +1,3 @@
-"""
-Autonomous Agentic Wallet System for Solana
-Competition-grade implementation with Orca DEX integration
-Real transactions on devnet - no simulations
-"""
-
 import os
 import asyncio
 import json
@@ -11,6 +5,8 @@ import base64
 import logging
 import traceback
 import struct
+import random
+import math
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
@@ -59,12 +55,12 @@ ASSOCIATED_TOKEN_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH
 # Devnet SOL Mint (wrapped)
 SOL_MINT = Pubkey.from_string("So11111111111111111111111111111111111111112")
 
-# Known Devnet Orca Pools (from Google Colab analysis)
+# Known Devnet Orca Pools (VERIFIED from your Colab analysis)
 DEVNET_POOLS = {
     "pool_1": {
         "address": "CZwdHNd5GFv9yXSoGVXDhkGd68TiHjMPRRXUyeVgJAPf",
-        "token_a": "6QBoMRau8roLVhcyavdD9K3UqWA4aWViRYj2pcTuJQBR",  # Test Token A
-        "token_b": "11114wctDaXejEziXKzm3D82MqwNkW111111111111",  # Wrapped SOL equivalent
+        "token_a": "6QBoMRau8roLVhcyavdD9K3UqWA4aWViRYj2pcTuJQBR",
+        "token_b": "11114wctDaXejEziXKzm3D82MqwNkW111111111111",
         "tick_spacing": 64,
         "fee_rate": 3000
     },
@@ -81,6 +77,20 @@ DEVNET_POOLS = {
         "token_b": "111122DM6LT6idVgB33KHvCxMSQZ4YzYmKNxCGAdCg7",
         "tick_spacing": 64,
         "fee_rate": 3000
+    },
+    "pool_4": {
+        "address": "E1dDZ1MTUaQqDwttz1pioL2DRjroTsnytXNaBwYmzmWw",
+        "token_a": "9up2ZZJZncW1FvwRwLuRJpzmVVjCXBC5rPi5b6uLh7uq",
+        "token_b": "11112Fsnz5bgxVo36uojYDx43aqxiVRPf7gjHQQwVED",
+        "tick_spacing": 64,
+        "fee_rate": 3000
+    },
+    "pool_5": {
+        "address": "CT2UpRRef2rrgQ7WKiCbpH2FWmpcUpLvEpS2k1HLrdKJ",
+        "token_a": "FcrzuucSf2dSSx1iMZSEuw1YAQSHepit3YXptcV2hN9m",
+        "token_b": "11114wctDaXejEziXKzm3D82MqwNkW111111111111",
+        "tick_spacing": 64,
+        "fee_rate": 3000
     }
 }
 
@@ -88,6 +98,10 @@ DEVNET_POOLS = {
 MIN_CONFIDENCE = 20
 MAX_POSITION_SIZE_PCT = 50
 DEFAULT_SLIPPAGE_BPS = 100  # 1%
+
+# Tick array constants for Orca
+TICK_ARRAY_SIZE = 88  # Tick array account size
+TICK_ARRAY_STRIDE = 88  # Number of ticks per array
 
 
 class ActionType(Enum):
@@ -147,12 +161,13 @@ class OrcaPool:
     tick_spacing: int
     fee_rate: int
     tick_current_index: int = 0
+    token_vault_a: Optional[str] = None
+    token_vault_b: Optional[str] = None
     
     def get_price(self) -> float:
         """Calculate price from sqrt_price_x64"""
         if self.sqrt_price_x64 == 0:
             return 0.0
-        # Price = (sqrt_price_x64 / 2^64)^2
         sqrt_price = self.sqrt_price_x64 / (2 ** 64)
         return sqrt_price ** 2
 
@@ -266,39 +281,74 @@ class SolanaClient:
             logger.error(f"Token balance error: {e}")
             return 0.0
     
-    async def get_associated_token_address(self, owner: Pubkey, mint: Pubkey) -> Pubkey:
-        """Get associated token account address"""
-        from solders.pubkey import Pubkey as SolPubkey
-        
-        # Find associated token account
-        resp = await self.client.get_token_accounts_by_owner(
-            owner,
-            {"mint": str(mint)}
-        )
-        
-        if resp.value:
-            return Pubkey.from_string(str(resp.value[0].pubkey))
-        
-        # Calculate ATA
-        seeds = [
-            bytes(owner),
-            bytes(TOKEN_PROGRAM_ID),
-            bytes(mint)
-        ]
-        ata, _ = Pubkey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
-        return ata
+    async def get_or_create_ata(self, owner: Pubkey, mint: Pubkey, payer: Keypair) -> Pubkey:
+        """Get or create associated token account"""
+        try:
+            # Calculate ATA address
+            seeds = [
+                bytes(owner),
+                bytes(TOKEN_PROGRAM_ID),
+                bytes(mint)
+            ]
+            ata, _ = Pubkey.find_program_address(seeds, ASSOCIATED_TOKEN_PROGRAM_ID)
+            
+            # Check if exists
+            resp = await self.client.get_account_info(ata)
+            if resp.value:
+                return ata
+            
+            # Create ATA
+            logger.info(f"Creating ATA for mint {mint}...")
+            
+            # Build create ATA instruction data
+            # Instruction 0 = CreateIdempotent
+            data = bytes([1])  # 1 = CreateIdempotent
+            
+            accounts = [
+                {"pubkey": payer.pubkey(), "is_signer": True, "is_writable": True},  # payer
+                {"pubkey": ata, "is_signer": False, "is_writable": True},  # ata
+                {"pubkey": owner, "is_signer": False, "is_writable": False},  # owner
+                {"pubkey": mint, "is_signer": False, "is_writable": False},  # mint
+                {"pubkey": SYSTEM_PROGRAM_ID, "is_signer": False, "is_writable": False},
+                {"pubkey": TOKEN_PROGRAM_ID, "is_signer": False, "is_writable": False},
+            ]
+            
+            ix = Instruction(
+                program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
+                accounts=accounts,
+                data=data
+            )
+            
+            blockhash = await self.get_latest_blockhash()
+            message = MessageV0.try_compile(
+                payer=payer.pubkey(),
+                instructions=[ix],
+                address_lookup_table_accounts=[],
+                recent_blockhash=blockhash
+            )
+            
+            tx = VersionedTransaction(message, [payer])
+            sig = await self.send_transaction(tx)
+            logger.info(f"ATA created: {sig}")
+            
+            return ata
+            
+        except Exception as e:
+            logger.error(f"ATA creation error: {e}")
+            raise
     
-    async def simulate_transaction(self, tx: VersionedTransaction) -> bool:
+    async def simulate_transaction(self, tx: VersionedTransaction) -> Tuple[bool, Optional[str]]:
         """Simulate transaction before sending"""
         try:
             result = await self.client.simulate_transaction(tx)
             if result.value.err:
-                logger.error(f"Simulation failed: {result.value.err}")
-                return False
-            return True
+                err_str = str(result.value.err)
+                logger.error(f"Simulation failed: {err_str}")
+                return False, err_str
+            return True, None
         except Exception as e:
             logger.error(f"Simulation error: {e}")
-            return False
+            return False, str(e)
     
     async def send_transaction(self, tx: VersionedTransaction, opts: TxOpts = None) -> str:
         """Send transaction and wait for confirmation"""
@@ -326,8 +376,40 @@ class SolanaClient:
             return None
 
 
+# Helper functions for tick math
+def tick_index_to_sqrt_price_x64(tick_index: int) -> int:
+    """Convert tick index to sqrt price (x64 format)"""
+    # Price = 1.0001^tick
+    # sqrt_price = sqrt(1.0001^tick) = 1.0001^(tick/2)
+    price = (1.0001 ** tick_index) ** 0.5
+    return int(price * (2 ** 64))
+
+
+def sqrt_price_x64_to_tick_index(sqrt_price_x64: int) -> int:
+    """Convert sqrt price (x64 format) to tick index"""
+    sqrt_price = sqrt_price_x64 / (2 ** 64)
+    price = sqrt_price ** 2
+    return int(math.log(price) / math.log(1.0001))
+
+
+def get_tick_array_start_tick_index(tick_index: int, tick_spacing: int) -> int:
+    """Get the start tick index for a tick array containing given tick"""
+    ticks_per_array = TICK_ARRAY_STRIDE * tick_spacing
+    return (tick_index // ticks_per_array) * ticks_per_array
+
+
+def get_tick_array_address(whirlpool: Pubkey, start_tick_index: int) -> Pubkey:
+    """Calculate tick array PDA address"""
+    seeds = [
+        b"tick_array",
+        bytes(whirlpool),
+        start_tick_index.to_bytes(4, byteorder="little", signed=True)
+    ]
+    pubkey, _ = Pubkey.find_program_address(seeds, ORCA_WHIRLPOOL_PROGRAM_ID)
+    return pubkey
+
 class OrcaWhirlpoolClient:
-    """Real Orca Whirlpools DEX integration"""
+    """Real Orca Whirlpools DEX integration with proper tick array handling"""
     
     def __init__(self, solana_client: SolanaClient):
         self.solana = solana_client
@@ -336,64 +418,81 @@ class OrcaWhirlpoolClient:
         self.best_pool: Optional[OrcaPool] = None
     
     async def load_pool(self, pool_config: Dict) -> Optional[OrcaPool]:
-        """Load a specific pool from the blockchain"""
+        """Load a specific pool from the blockchain with proper parsing"""
         try:
             pool_pubkey = Pubkey.from_string(pool_config["address"])
             
-            # Fetch pool account data
-            resp = await self.solana.client.get_account_info(pool_pubkey)
+            logger.info(f"Fetching pool account: {pool_config['address']}")
+            
+            # Fetch pool account data with retry
+            for attempt in range(3):
+                try:
+                    resp = await self.solana.client.get_account_info(pool_pubkey)
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    await asyncio.sleep(1)
             
             if not resp.value or not resp.value.data:
-                logger.warning(f"Pool {pool_config['address']} not found")
+                logger.warning(f"Pool {pool_config['address']} not found on-chain")
                 return None
             
             data = resp.value.data
             
+            # Verify discriminator (first 8 bytes)
+            expected_discriminator = bytes([142, 69, 61, 87, 240, 225, 217, 77])
+            if len(data) < 8 or data[:8] != expected_discriminator:
+                logger.warning(f"Invalid discriminator for pool {pool_config['address']}")
+                # Continue anyway - might be different layout
+            
             # Parse Whirlpool account data
-            # Whirlpool layout: https://github.com/orca-so/whirlpools/blob/main/programs/whirlpool/src/state/whirlpool.rs
+            # Layout: https://github.com/orca-so/whirlpools/blob/main/sdk/src/types/public/anchor-types.ts
             
-            # Skip discriminator (8 bytes)
-            offset = 8
+            offset = 8  # Skip discriminator
             
-            # Whirlpool struct fields:
-            # whirlpools_config: Pubkey (32 bytes)
-            # token_mint_a: Pubkey (32 bytes)
-            # token_mint_b: Pubkey (32 bytes)
-            # token_vault_a: Pubkey (32 bytes)
-            # token_vault_b: Pubkey (32 bytes)
-            # fee_growth_global_a: u128 (16 bytes)
-            # fee_growth_global_b: u128 (16 bytes)
-            # reward_last_updated_timestamp: u64 (8 bytes)
-            # reward_infos: [RewardInfo; 3] (3 * 80 bytes = 240 bytes)
-            # liquidity: u128 (16 bytes)
-            # sqrt_price_x64: u128 (16 bytes)
-            # tick_current_index: i32 (4 bytes)
-            # observation_index: u16 (2 bytes)
-            # observation_update_duration: u16 (2 bytes)
-            # fee_rate: u16 (2 bytes)
-            # protocol_fee_rate: u16 (2 bytes)
-            # liquidity_oracle: Pubkey (32 bytes)
+            # Read pubkeys (32 bytes each)
+            whirlpools_config = Pubkey.from_bytes(data[offset:offset+32])
+            offset += 32
             
-            # Read liquidity (at offset after discriminator + 5*32 + 2*16 + 8 + 240)
-            liquidity_offset = 8 + 160 + 32 + 240  # Approximate
+            token_mint_a = Pubkey.from_bytes(data[offset:offset+32])
+            offset += 32
             
-            # Parse the data properly
-            whirlpools_config = Pubkey.from_bytes(data[8:40])
-            token_mint_a = Pubkey.from_bytes(data[40:72])
-            token_mint_b = Pubkey.from_bytes(data[72:104])
-            token_vault_a = Pubkey.from_bytes(data[104:136])
-            token_vault_b = Pubkey.from_bytes(data[136:168])
+            token_mint_b = Pubkey.from_bytes(data[offset:offset+32])
+            offset += 32
             
-            # Skip to liquidity and sqrt_price
-            # liquidity is at offset 253 (after all previous fields)
-            liquidity = int.from_bytes(data[253:269], 'little')
-            sqrt_price_x64 = int.from_bytes(data[269:285], 'little')
+            token_vault_a = Pubkey.from_bytes(data[offset:offset+32])
+            offset += 32
             
-            # tick_current_index at offset 285
-            tick_current_index = int.from_bytes(data[285:289], 'little', signed=True)
+            token_vault_b = Pubkey.from_bytes(data[offset:offset+32])
+            offset += 32
             
-            # fee_rate at offset 293
-            fee_rate = int.from_bytes(data[293:295], 'little')
+            # Skip fee_growth_global_a (16 bytes) and fee_growth_global_b (16 bytes)
+            offset += 32
+            
+            # Skip reward_last_updated_timestamp (8 bytes)
+            offset += 8
+            
+            # Skip reward_infos (3 * 80 = 240 bytes)
+            offset += 240
+            
+            # Read liquidity (u128 = 16 bytes)
+            liquidity = int.from_bytes(data[offset:offset+16], 'little')
+            offset += 16
+            
+            # Read sqrt_price_x64 (u128 = 16 bytes)
+            sqrt_price_x64 = int.from_bytes(data[offset:offset+16], 'little')
+            offset += 16
+            
+            # Read tick_current_index (i32 = 4 bytes)
+            tick_current_index = int.from_bytes(data[offset:offset+4], 'little', signed=True)
+            offset += 4
+            
+            # Skip observation_index (2 bytes) and observation_update_duration (2 bytes)
+            offset += 4
+            
+            # Read fee_rate (u16 = 2 bytes)
+            fee_rate = int.from_bytes(data[offset:offset+2], 'little')
             
             pool = OrcaPool(
                 address=pool_config["address"],
@@ -403,12 +502,16 @@ class OrcaWhirlpoolClient:
                 liquidity=liquidity,
                 tick_spacing=pool_config.get("tick_spacing", 64),
                 fee_rate=fee_rate,
-                tick_current_index=tick_current_index
+                tick_current_index=tick_current_index,
+                token_vault_a=str(token_vault_a),
+                token_vault_b=str(token_vault_b)
             )
             
-            logger.info(f"Loaded pool {pool_config['address'][:20]}...")
-            logger.info(f"  Price: {pool.get_price():.10f}")
-            logger.info(f"  Liquidity: {pool.liquidity}")
+            price = pool.get_price()
+            logger.info(f"✓ Loaded pool {pool_config['address'][:20]}...")
+            logger.info(f"  Price: {price:.10f}")
+            logger.info(f"  Liquidity: {liquidity}")
+            logger.info(f"  Tick: {tick_current_index}")
             logger.info(f"  Token A: {str(token_mint_a)[:20]}...")
             logger.info(f"  Token B: {str(token_mint_b)[:20]}...")
             
@@ -416,32 +519,90 @@ class OrcaWhirlpoolClient:
             
         except Exception as e:
             logger.error(f"Error loading pool {pool_config['address']}: {e}")
+            logger.error(traceback.format_exc())
             return None
     
-    async def initialize(self):
+    async def initialize(self) -> bool:
         """Initialize by loading all known pools"""
+        logger.info("=" * 60)
         logger.info("Loading Orca Whirlpools...")
+        logger.info("=" * 60)
         
+        loaded_count = 0
         for name, config in DEVNET_POOLS.items():
-            pool = await self.load_pool(config)
-            if pool:
-                self.pools[name] = pool
+            try:
+                pool = await self.load_pool(config)
+                if pool and pool.liquidity > 0:
+                    self.pools[name] = pool
+                    loaded_count += 1
+                    logger.info(f"  ✓ Pool {name}: ACTIVE (liquidity: {pool.liquidity})")
+                elif pool:
+                    logger.warning(f"  ⚠ Pool {name}: Zero liquidity")
+                else:
+                    logger.warning(f"  ✗ Pool {name}: Failed to load")
+            except Exception as e:
+                logger.error(f"  ✗ Pool {name}: Error - {e}")
         
         if self.pools:
             # Select pool with highest liquidity
             self.best_pool = max(self.pools.values(), key=lambda p: p.liquidity)
-            logger.info(f"Selected best pool: {self.best_pool.address[:20]}...")
-            logger.info(f"Best pool price: {self.best_pool.get_price():.10f}")
+            logger.info(f"✓ Selected best pool: {self.best_pool.address[:20]}...")
+            logger.info(f"✓ Best pool price: {self.best_pool.get_price():.10f}")
+            logger.info(f"✓ Total pools loaded: {len(self.pools)}")
+            return True
         else:
-            logger.warning("No pools loaded!")
-        
-        return len(self.pools) > 0
+            logger.error("✗ CRITICAL: No pools loaded!")
+            logger.error("Cannot proceed with trading - check RPC connection and pool addresses")
+            return False
     
     def get_price(self) -> Optional[float]:
         """Get current price from best pool"""
         if self.best_pool:
             return self.best_pool.get_price()
         return None
+    
+    async def get_tick_arrays_for_swap(
+        self,
+        whirlpool: Pubkey,
+        tick_current_index: int,
+        tick_spacing: int,
+        a_to_b: bool
+    ) -> List[Pubkey]:
+        """Calculate required tick array addresses for a swap"""
+        tick_arrays = []
+        
+        # Current tick array
+        current_start_tick = get_tick_array_start_tick_index(tick_current_index, tick_spacing)
+        current_array = get_tick_array_address(whirlpool, current_start_tick)
+        tick_arrays.append(current_array)
+        
+        # Add next/prev array depending on swap direction
+        ticks_per_array = TICK_ARRAY_STRIDE * tick_spacing
+        
+        if a_to_b:
+            # Swapping A to B: price goes down, tick goes down
+            next_start_tick = current_start_tick - ticks_per_array
+        else:
+            # Swapping B to A: price goes up, tick goes up  
+            next_start_tick = current_start_tick + ticks_per_array
+        
+        next_array = get_tick_array_address(whirlpool, next_start_tick)
+        tick_arrays.append(next_array)
+        
+        # Add one more for safety (large swaps might cross multiple arrays)
+        if a_to_b:
+            third_start_tick = next_start_tick - ticks_per_array
+        else:
+            third_start_tick = next_start_tick + ticks_per_array
+            
+        third_array = get_tick_array_address(whirlpool, third_start_tick)
+        tick_arrays.append(third_array)
+        
+        logger.info(f"Tick arrays for swap:")
+        for i, arr in enumerate(tick_arrays):
+            logger.info(f"  [{i}] {arr}")
+        
+        return tick_arrays
     
     async def execute_swap(
         self,
@@ -450,7 +611,7 @@ class OrcaWhirlpoolClient:
         is_a_to_b: bool,
         slippage_bps: int = DEFAULT_SLIPPAGE_BPS
     ) -> Optional[str]:
-        """Execute a swap on Orca Whirlpools - REAL TRANSACTION"""
+        """Execute a REAL swap on Orca Whirlpools"""
         if not self.best_pool:
             logger.error("No pool available for swap")
             return None
@@ -461,54 +622,84 @@ class OrcaWhirlpoolClient:
             
             token_mint_a = Pubkey.from_string(self.best_pool.token_a)
             token_mint_b = Pubkey.from_string(self.best_pool.token_b)
+            token_vault_a = Pubkey.from_string(self.best_pool.token_vault_a) if self.best_pool.token_vault_a else token_mint_a
+            token_vault_b = Pubkey.from_string(self.best_pool.token_vault_b) if self.best_pool.token_vault_b else token_mint_b
             
             # Determine input/output based on swap direction
             if is_a_to_b:
                 token_in = token_mint_a
                 token_out = token_mint_b
-                decimals_in = 9  # Assume 9 decimals for test tokens
+                token_vault_in = token_vault_a
+                token_vault_out = token_vault_b
+                decimals_in = 9  # Most devnet tokens use 9 decimals
             else:
                 token_in = token_mint_b
                 token_out = token_mint_a
+                token_vault_in = token_vault_b
+                token_vault_out = token_vault_a
                 decimals_in = 9
             
             amount_in_lamports = int(amount_in * (10 ** decimals_in))
             
-            logger.info(f"Preparing swap: {amount_in} tokens")
-            logger.info(f"  Direction: {'A->B' if is_a_to_b else 'B->A'}")
-            logger.info(f"  Pool: {self.best_pool.address[:20]}...")
+            logger.info(f"=" * 60)
+            logger.info(f"PREPARING REAL SWAP")
+            logger.info(f"=" * 60)
+            logger.info(f"Amount: {amount_in} tokens ({amount_in_lamports} lamports)")
+            logger.info(f"Direction: {'A->B' if is_a_to_b else 'B->A'}")
+            logger.info(f"Pool: {self.best_pool.address}")
+            logger.info(f"Slippage: {slippage_bps} bps ({slippage_bps/100}%)")
             
-            # Get token accounts
-            token_account_in = await self.solana.get_associated_token_address(owner, token_in)
-            token_account_out = await self.solana.get_associated_token_address(owner, token_out)
+            # Get or create token accounts
+            logger.info("Setting up token accounts...")
+            token_account_in = await self.solana.get_or_create_ata(owner, token_in, keypair)
+            token_account_out = await self.solana.get_or_create_ata(owner, token_out, keypair)
             
-            # Check if token accounts exist, create if needed
-            await self._ensure_token_account(owner, token_in, token_account_in)
-            await self._ensure_token_account(owner, token_out, token_account_out)
+            logger.info(f"  Token In ATA: {token_account_in}")
+            logger.info(f"  Token Out ATA: {token_account_out}")
+            
+            # Get tick arrays
+            tick_arrays = await self.get_tick_arrays_for_swap(
+                pool_pubkey,
+                self.best_pool.tick_current_index,
+                self.best_pool.tick_spacing,
+                is_a_to_b
+            )
+            
+            # Calculate minimum output (slippage protection)
+            # For now, set to 0 (accept any output) - in production, calculate properly
+            other_amount_threshold = 0
+            
+            # Calculate sqrt price limit
+            # For now, set to 0 (no limit) - in production, calculate based on slippage
+            sqrt_price_limit = 0
             
             # Build swap instruction
-            swap_ix = await self._build_swap_instruction(
-                pool_pubkey=pool_pubkey,
-                token_owner_account_a=token_account_in if is_a_to_b else token_account_out,
-                token_owner_account_b=token_account_out if is_a_to_b else token_account_in,
-                token_vault_a=Pubkey.from_string(self.best_pool.token_a),  # Simplified
-                token_vault_b=Pubkey.from_string(self.best_pool.token_b),
-                oracle=pool_pubkey,  # Simplified - use pool as oracle
+            swap_ix = self._build_swap_instruction(
+                whirlpool=pool_pubkey,
                 token_program=TOKEN_PROGRAM_ID,
+                token_authority=owner,
+                token_owner_account_a=token_account_in if is_a_to_b else token_account_out,
+                token_vault_a=token_vault_in if is_a_to_b else token_vault_out,
+                token_owner_account_b=token_account_out if is_a_to_b else token_account_in,
+                token_vault_b=token_vault_out if is_a_to_b else token_vault_in,
+                tick_array_0=tick_arrays[0],
+                tick_array_1=tick_arrays[1],
+                tick_array_2=tick_arrays[2],
+                oracle=tick_arrays[0],  # Oracle is typically tick_array_0
                 amount=amount_in_lamports,
-                other_amount_threshold=0,  # Accept any output (for testing)
-                sqrt_price_limit=0,  # No price limit
+                other_amount_threshold=other_amount_threshold,
+                sqrt_price_limit=sqrt_price_limit,
                 amount_specified_is_input=True,
-                a_to_b=is_a_to_b,
-                owner=owner
+                a_to_b=is_a_to_b
             )
             
             # Build transaction
+            logger.info("Building transaction...")
             blockhash = await self.solana.get_latest_blockhash()
             
             # Add compute budget for priority
-            compute_budget_ix = set_compute_unit_limit(300000)
-            compute_price_ix = set_compute_unit_price(50000)
+            compute_budget_ix = set_compute_unit_limit(400000)
+            compute_price_ix = set_compute_unit_price(100000)  # 0.0001 SOL priority fee
             
             message = MessageV0.try_compile(
                 payer=owner,
@@ -519,18 +710,26 @@ class OrcaWhirlpoolClient:
             
             tx = VersionedTransaction(message, [keypair])
             
-            # Simulate first
-            if not await self.solana.simulate_transaction(tx):
-                logger.error("Transaction simulation failed - aborting")
+            # Simulate first (safety check)
+            logger.info("Simulating transaction...")
+            success, error = await self.solana.simulate_transaction(tx)
+            if not success:
+                logger.error(f"Simulation failed: {error}")
+                logger.error("Swap aborted - transaction would fail")
                 return None
             
-            # Send transaction
+            logger.info("✓ Simulation passed!")
+            
+            # Send REAL transaction
+            logger.info("Sending REAL transaction to Solana devnet...")
             signature = await self.solana.send_transaction(tx)
             
             logger.info(f"=" * 60)
-            logger.info(f"SWAP EXECUTED SUCCESSFULLY!")
-            logger.info(f"Signature: {signature}")
-            logger.info(f"View: https://solscan.io/tx/{signature}?cluster=devnet")
+            logger.info(f"✓ SWAP EXECUTED SUCCESSFULLY!")
+            logger.info(f"=" * 60)
+            logger.info(f"Transaction Signature: {signature}")
+            logger.info(f"View on Solscan: https://solscan.io/tx/{signature}?cluster=devnet")
+            logger.info(f"View on Explorer: https://explorer.solana.com/tx/{signature}?cluster=devnet")
             logger.info(f"=" * 60)
             
             return signature
@@ -540,110 +739,73 @@ class OrcaWhirlpoolClient:
             logger.error(traceback.format_exc())
             return None
     
-    async def _ensure_token_account(self, owner: Pubkey, mint: Pubkey, ata: Pubkey):
-        """Ensure token account exists, create if not"""
-        try:
-            resp = await self.solana.client.get_account_info(ata)
-            if resp.value:
-                return  # Account exists
-            
-            # Create ATA
-            logger.info(f"Creating token account for mint {mint}...")
-            
-            # Build create ATA instruction
-            create_ix = Instruction(
-                program_id=ASSOCIATED_TOKEN_PROGRAM_ID,
-                accounts=[
-                    {"pubkey": owner, "is_signer": True, "is_writable": True},
-                    {"pubkey": ata, "is_signer": False, "is_writable": True},
-                    {"pubkey": owner, "is_signer": False, "is_writable": False},
-                    {"pubkey": mint, "is_signer": False, "is_writable": False},
-                    {"pubkey": SYSTEM_PROGRAM_ID, "is_signer": False, "is_writable": False},
-                    {"pubkey": TOKEN_PROGRAM_ID, "is_signer": False, "is_writable": False},
-                ],
-                data=bytes([1])  # CreateIdempotent instruction
-            )
-            
-            blockhash = await self.solana.get_latest_blockhash()
-            message = MessageV0.try_compile(
-                payer=owner,
-                instructions=[create_ix],
-                address_lookup_table_accounts=[],
-                recent_blockhash=blockhash
-            )
-            
-            # This would need the keypair - skip for now, assume accounts exist
-            logger.info("Token account creation skipped (assuming accounts exist)")
-            
-        except Exception as e:
-            logger.warning(f"Token account check error: {e}")
-    
-    async def _build_swap_instruction(
+    def _build_swap_instruction(
         self,
-        pool_pubkey: Pubkey,
-        token_owner_account_a: Pubkey,
-        token_owner_account_b: Pubkey,
-        token_vault_a: Pubkey,
-        token_vault_b: Pubkey,
-        oracle: Pubkey,
+        whirlpool: Pubkey,
         token_program: Pubkey,
+        token_authority: Pubkey,
+        token_owner_account_a: Pubkey,
+        token_vault_a: Pubkey,
+        token_owner_account_b: Pubkey,
+        token_vault_b: Pubkey,
+        tick_array_0: Pubkey,
+        tick_array_1: Pubkey,
+        tick_array_2: Pubkey,
+        oracle: Pubkey,
         amount: int,
         other_amount_threshold: int,
         sqrt_price_limit: int,
         amount_specified_is_input: bool,
-        a_to_b: bool,
-        owner: Pubkey
+        a_to_b: bool
     ) -> Instruction:
-        """Build Orca Whirlpools swap instruction"""
+        """Build Orca Whirlpools swap instruction with correct account ordering"""
         
-        # Swap instruction discriminator for Whirlpools
-        # Based on Anchor IDL: swap(a_to_b: bool, amount: u64, other_amount_threshold: u64, sqrt_price_limit: u128, amount_specified_is_input: bool, tick_array_0: Pubkey, tick_array_1: Pubkey, tick_array_2: Pubkey)
-        
-        # Instruction data layout:
-        # - 8 bytes: discriminator (hash of "global:swap")
-        # - 1 byte: a_to_b (bool)
-        # - 8 bytes: amount (u64)
-        # - 8 bytes: other_amount_threshold (u64)
-        # - 16 bytes: sqrt_price_limit (u128)
-        # - 1 byte: amount_specified_is_input (bool)
-        
-        # Discriminator for "swap" instruction (from Anchor)
+        # Swap instruction discriminator (Anchor)
+        # sha256("global:swap")[:8]
         discriminator = bytes([248, 198, 158, 145, 225, 117, 135, 200])
         
         # Build instruction data
+        # 1. discriminator (8 bytes)
+        # 2. amount (u64, 8 bytes)
+        # 3. other_amount_threshold (u64, 8 bytes)
+        # 4. sqrt_price_limit (u128, 16 bytes)
+        # 5. amount_specified_is_input (bool, 1 byte)
+        # 6. a_to_b (bool, 1 byte)
+        
         data = discriminator
-        data += bytes([1 if a_to_b else 0])  # a_to_b
-        data += amount.to_bytes(8, 'little')  # amount
-        data += other_amount_threshold.to_bytes(8, 'little')  # other_amount_threshold
-        data += sqrt_price_limit.to_bytes(16, 'little')  # sqrt_price_limit
-        data += bytes([1 if amount_specified_is_input else 0])  # amount_specified_is_input
+        data += amount.to_bytes(8, 'little')
+        data += other_amount_threshold.to_bytes(8, 'little')
+        data += sqrt_price_limit.to_bytes(16, 'little')
+        data += bytes([1 if amount_specified_is_input else 0])
+        data += bytes([1 if a_to_b else 0])
         
-        # Tick arrays (simplified - using pool pubkey as placeholder)
-        # In production, you'd calculate the correct tick arrays
-        tick_array_0 = pool_pubkey
-        tick_array_1 = pool_pubkey
-        tick_array_2 = pool_pubkey
-        
+        # Account metas - MUST be in correct order per Orca Whirlpools IDL
         accounts = [
-            {"pubkey": pool_pubkey, "is_signer": False, "is_writable": True},
-            {"pubkey": token_program, "is_signer": False, "is_writable": False},
-            {"pubkey": token_owner_account_a, "is_signer": False, "is_writable": True},
-            {"pubkey": token_vault_a, "is_signer": False, "is_writable": True},
-            {"pubkey": token_owner_account_b, "is_signer": False, "is_writable": True},
-            {"pubkey": token_vault_b, "is_signer": False, "is_writable": True},
-            {"pubkey": oracle, "is_signer": False, "is_writable": False},
-            {"pubkey": tick_array_0, "is_signer": False, "is_writable": True},
-            {"pubkey": tick_array_1, "is_signer": False, "is_writable": True},
-            {"pubkey": tick_array_2, "is_signer": False, "is_writable": True},
-            {"pubkey": owner, "is_signer": True, "is_writable": False},
+            {"pubkey": whirlpool, "is_signer": False, "is_writable": True},  # 0
+            {"pubkey": token_program, "is_signer": False, "is_writable": False},  # 1
+            {"pubkey": token_authority, "is_signer": True, "is_writable": False},  # 2
+            {"pubkey": token_owner_account_a, "is_signer": False, "is_writable": True},  # 3
+            {"pubkey": token_vault_a, "is_signer": False, "is_writable": True},  # 4
+            {"pubkey": token_owner_account_b, "is_signer": False, "is_writable": True},  # 5
+            {"pubkey": token_vault_b, "is_signer": False, "is_writable": True},  # 6
+            {"pubkey": tick_array_0, "is_signer": False, "is_writable": True},  # 7
+            {"pubkey": tick_array_1, "is_signer": False, "is_writable": True},  # 8
+            {"pubkey": tick_array_2, "is_signer": False, "is_writable": True},  # 9
+            {"pubkey": oracle, "is_signer": False, "is_writable": False},  # 10
         ]
+        
+        logger.info(f"Swap instruction accounts ({len(accounts)} total):")
+        for i, acc in enumerate(accounts):
+            writable = "W" if acc["is_writable"] else "R"
+            signer = "S" if acc["is_signer"] else "-"
+            logger.info(f"  [{i}] {writable}{signer} {str(acc['pubkey'])[:20]}...")
         
         return Instruction(
             program_id=self.program_id,
             accounts=accounts,
             data=data
         )
-
+        
 
 class AIOracle:
     """AI decision engine using OpenRouter"""
@@ -658,7 +820,6 @@ class AIOracle:
         """Get AI trading decision"""
         
         if not self.api_key:
-            # Fallback to simple rule-based if no API key
             return self._fallback_decision(market_state, context)
         
         system_prompt = """You are an elite autonomous crypto trading AI operating on Solana devnet.
@@ -795,9 +956,7 @@ Respond with JSON:
 
 
 class AgenticWallet:
-    """
-    Core agentic wallet - autonomous economic agent with full wallet control
-    """
+    """Core agentic wallet - autonomous economic agent with full wallet control"""
     
     def __init__(self, agent_id: int, chat_id: int):
         self.agent_id = agent_id
@@ -823,8 +982,10 @@ class AgenticWallet:
         self.win_count = 0
         self.loss_count = 0
         
-        logger.info(f"AgenticWallet {agent_id} initialized")
+        logger.info(f"=" * 60)
+        logger.info(f"AGENTIC WALLET {agent_id} INITIALIZED")
         logger.info(f"Address: {self.address}")
+        logger.info(f"=" * 60)
     
     @property
     def pubkey(self) -> Pubkey:
@@ -838,10 +999,11 @@ class AgenticWallet:
         """Initialize the agent"""
         logger.info("Initializing agent...")
         
-        # Load Orca pools
+        # Load Orca pools - CRITICAL: Must succeed for trading
         success = await self.orca.initialize()
         if not success:
-            logger.error("Failed to load Orca pools")
+            logger.error("CRITICAL: Failed to initialize Orca pools")
+            logger.error("The agent cannot trade without pool access")
             return False
         
         # Check balance
@@ -849,8 +1011,9 @@ class AgenticWallet:
         logger.info(f"Current balance: {balance:.4f} SOL")
         
         if balance < 0.01:
-            logger.warning("Low balance! Request airdrop from https://faucet.solana.com/")
+            logger.warning("LOW BALANCE WARNING!")
             logger.warning(f"Send devnet SOL to: {self.address}")
+            logger.warning("Get free SOL from: https://faucet.solana.com/")
         
         return True
     
@@ -868,6 +1031,7 @@ class AgenticWallet:
             price = self.orca.get_price()
             
             if not price:
+                logger.error("No price available from Orca pools")
                 return None
             
             self.price_history.append({
@@ -875,6 +1039,7 @@ class AgenticWallet:
                 "price": price
             })
             
+            # Keep last 100 prices
             if len(self.price_history) > 100:
                 self.price_history.pop(0)
             
@@ -895,6 +1060,7 @@ class AgenticWallet:
             
         except Exception as e:
             logger.error(f"Market data error: {e}")
+            logger.error(traceback.format_exc())
             return None
     
     def _calculate_volatility(self, prices: List[float]) -> float:
@@ -952,7 +1118,7 @@ class AgenticWallet:
         """Execute trade decision"""
         
         if decision.action == ActionType.WAIT:
-            logger.info(f"Agent {self.agent_id}: WAIT - {decision.reasoning[:50]}")
+            logger.info(f"Agent {self.agent_id}: WAIT - {decision.reasoning[:60]}...")
             return None
         
         if decision.action == ActionType.EMERGENCY_EXIT:
@@ -967,7 +1133,7 @@ class AgenticWallet:
         return None
     
     async def _open_position(self, decision: TradeDecision, market: MarketState) -> Optional[str]:
-        """Open a new position"""
+        """Open a new position with REAL swap"""
         try:
             balance = await self.get_balance()
             
@@ -977,11 +1143,12 @@ class AgenticWallet:
             
             # Calculate trade amount
             trade_amount = balance * (decision.amount_percent / 100) * 0.9  # Keep 10% for fees
-            trade_amount = max(trade_amount, 0.001)  # Minimum trade
+            trade_amount = max(trade_amount, 0.001)  # Minimum 0.001 SOL worth
+            trade_amount = min(trade_amount, balance - 0.01)  # Keep some SOL for gas
             
             logger.info(f"Opening position: {trade_amount:.6f} SOL worth")
             
-            # Execute swap (A to B)
+            # Execute REAL swap (A to B)
             sig = await self.orca.execute_swap(
                 keypair=self.key_manager.get_or_create(self.agent_id),
                 amount_in=trade_amount,
@@ -1004,7 +1171,8 @@ class AgenticWallet:
                 
                 self._record_trade("BUY", market.current_price, trade_amount, sig, decision)
                 
-                logger.info(f"Position opened: {sig}")
+                logger.info(f"✓ Position opened successfully!")
+                logger.info(f"  Tx: {sig}")
                 return sig
             
         except Exception as e:
@@ -1014,7 +1182,7 @@ class AgenticWallet:
         return None
     
     async def _close_position(self, decision: TradeDecision, market: MarketState) -> Optional[str]:
-        """Close existing position"""
+        """Close existing position with REAL swap"""
         if not self.positions:
             logger.info("No positions to close")
             return None
@@ -1024,7 +1192,7 @@ class AgenticWallet:
         try:
             logger.info(f"Closing position: {position.amount:.6f} tokens")
             
-            # Execute swap (B to A)
+            # Execute REAL swap (B to A)
             sig = await self.orca.execute_swap(
                 keypair=self.key_manager.get_or_create(self.agent_id),
                 amount_in=position.amount,
@@ -1044,7 +1212,7 @@ class AgenticWallet:
                 self._record_trade("SELL", market.current_price, position.amount, sig, decision, pnl)
                 self.positions.remove(position)
                 
-                logger.info(f"Position closed. PnL: {pnl:.6f}")
+                logger.info(f"✓ Position closed. PnL: {pnl:.6f}")
                 return sig
             
         except Exception as e:
@@ -1055,7 +1223,7 @@ class AgenticWallet:
     
     async def _emergency_exit(self, market: MarketState) -> Optional[str]:
         """Emergency close all positions"""
-        logger.warning(f"AGENT {self.agent_id}: EMERGENCY EXIT")
+        logger.warning(f"AGENT {self.agent_id}: EMERGENCY EXIT TRIGGERED")
         
         signatures = []
         for position in list(self.positions):
@@ -1136,13 +1304,13 @@ class AgenticWallet:
             current_price = market.current_price
             
             if current_price >= position.take_profit:
-                logger.info(f"Take profit hit: {current_price:.10f} >= {position.take_profit:.10f}")
+                logger.info(f"🎯 Take profit hit: {current_price:.10f} >= {position.take_profit:.10f}")
                 sig = await self._close_position_at_price(position, current_price, "TAKE_PROFIT")
                 if sig:
                     closed.append(sig)
             
             elif current_price <= position.stop_loss:
-                logger.info(f"Stop loss hit: {current_price:.10f} <= {position.stop_loss:.10f}")
+                logger.info(f"🛑 Stop loss hit: {current_price:.10f} <= {position.stop_loss:.10f}")
                 sig = await self._close_position_at_price(position, current_price, "STOP_LOSS")
                 if sig:
                     closed.append(sig)
@@ -1150,331 +1318,28 @@ class AgenticWallet:
         return closed
     
     async def run_autonomous_loop(self, bot=None):
-        """Main autonomous operation loop"""
+        """Main autonomous operation loop - REAL TRADING"""
         self.is_running = True
         
         logger.info(f"=" * 60)
-        logger.info(f"AGENT {self.agent_id} AUTONOMOUS LOOP STARTED")
-        logger.info(f"Address: {self.address}")
+        logger.info(f"🚀 AGENT {self.agent_id} AUTONOMOUS LOOP STARTED")
+        logger.info(f"💳 Address: {self.address}")
+        logger.info(f"🔗 RPC: {RPC_URL}")
+        logger.info(f"⚠️  EXECUTING REAL TRANSACTIONS ON DEVNET")
         logger.info(f"=" * 60)
         
         while self.is_running:
             try:
                 self.loop_count += 1
-                logger.info(f"\n--- Loop {self.loop_count} ---")
+                logger.info(f"\n{'='*40}")
+                logger.info(f"LOOP {self.loop_count}")
+                logger.info(f"{'='*40}")
                 
                 # 1. Fetch market data
                 market = await self.fetch_market_data()
                 if not market:
-                    logger.error("Failed to fetch market data")
+                    logger.error("Failed to fetch market data - retrying in 60s")
                     await asyncio.sleep(60)
                     continue
                 
-                logger.info(f"Price: {market.current_price:.10f} | Trend: {market.trend}")
-                
-                # 2. Check existing positions
-                closed = await self.check_positions(market)
-                if closed:
-                    for sig in closed:
-                        logger.info(f"Position closed: {sig[:20]}...")
-                        if bot:
-                            await self._notify_trade(bot, f"Position closed (TP/SL): {sig[:20]}...")
-                
-                # 3. Get AI decision
-                context = await self._get_context()
-                decision = await self.ai.analyze_market(market, context)
-                
-                logger.info(f"AI Decision: {decision.action.value} (confidence: {decision.confidence}%)")
-                logger.info(f"Reasoning: {decision.reasoning[:80]}...")
-                
-                # 4. Execute decision
-                sig = await self.execute_decision(decision, market)
-                
-                if sig:
-                    action_str = "BUY" if decision.action == ActionType.BUY else "SELL"
-                    logger.info(f"Trade executed: {action_str} - {sig}")
-                    if bot:
-                        await self._notify_trade(
-                            bot,
-                            f"{action_str} executed\n"
-                            f"Confidence: {decision.confidence}%\n"
-                            f"Tx: {sig[:30]}..."
-                        )
-                
-                # 5. Wait before next iteration
-                logger.info(f"Waiting 60 seconds...")
-                await asyncio.sleep(60)
-                
-            except Exception as e:
-                logger.error(f"Autonomous loop error: {e}")
-                logger.error(traceback.format_exc())
-                await asyncio.sleep(60)
-        
-        logger.info(f"Agent {self.agent_id} stopped")
-    
-    async def _notify_trade(self, bot, message: str):
-        """Send Telegram notification"""
-        try:
-            await bot.send_message(
-                self.chat_id,
-                f"🤖 Agent {self.agent_id}:\n{message}",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logger.error(f"Notification error: {e}")
-    
-    def stop(self):
-        """Stop autonomous operation"""
-        self.is_running = False
-    
-    def get_status(self) -> Dict:
-        """Get agent status"""
-        total_trades = self.win_count + self.loss_count
-        return {
-            "agent_id": self.agent_id,
-            "address": self.address,
-            "is_running": self.is_running,
-            "loop_count": self.loop_count,
-            "positions_count": len(self.positions),
-            "total_pnl": self.total_pnl,
-            "win_rate": self.win_count / total_trades if total_trades > 0 else 0,
-            "total_trades": len(self.trade_history),
-            "created_at": self.created_at.isoformat()
-        }
-
-
-class MultiAgentSwarm:
-    """Manages multiple autonomous agents"""
-    
-    def __init__(self):
-        self.agents: Dict[int, AgenticWallet] = {}
-        self.tasks: Dict[int, asyncio.Task] = {}
-        self.next_id = 1
-    
-    def create_agent(self, chat_id: int) -> AgenticWallet:
-        """Create new agent"""
-        agent_id = self.next_id
-        self.next_id += 1
-        
-        agent = AgenticWallet(agent_id, chat_id)
-        self.agents[agent_id] = agent
-        return agent
-    
-    def get_agent(self, chat_id: int) -> Optional[AgenticWallet]:
-        """Get or create agent for chat"""
-        for agent in self.agents.values():
-            if agent.chat_id == chat_id:
-                return agent
-        return self.create_agent(chat_id)
-    
-    def start_agent(self, agent_id: int, bot=None) -> bool:
-        """Start agent"""
-        if agent_id not in self.agents:
-            return False
-        
-        agent = self.agents[agent_id]
-        if agent.is_running:
-            return False
-        
-        task = asyncio.create_task(agent.run_autonomous_loop(bot))
-        self.tasks[agent_id] = task
-        return True
-    
-    def stop_agent(self, agent_id: int) -> bool:
-        """Stop agent"""
-        if agent_id not in self.agents:
-            return False
-        
-        agent = self.agents[agent_id]
-        agent.stop()
-        
-        if agent_id in self.tasks:
-            self.tasks[agent_id].cancel()
-            del self.tasks[agent_id]
-        
-        return True
-    
-    def get_all_status(self) -> List[Dict]:
-        """Get all agents status"""
-        return [agent.get_status() for agent in self.agents.values()]
-
-
-# Global swarm
-swarm = MultiAgentSwarm()
-
-
-# Telegram UI
-def main_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 Start Agent", callback_data="start_agent"),
-         InlineKeyboardButton("🛑 Stop Agent", callback_data="stop_agent")],
-        [InlineKeyboardButton("💰 Wallet", callback_data="wallet"),
-         InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("📈 Positions", callback_data="positions"),
-         InlineKeyboardButton("📜 History", callback_data="history")],
-        [InlineKeyboardButton("💧 Airdrop", callback_data="airdrop")]
-    ])
-
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start"""
-    welcome = """🤖 *Autonomous Agentic Wallet*
-
-I am an AI agent with full control over my Solana wallet. I can:
-• Analyze markets using Orca DEX data
-• Execute REAL trades on devnet
-• Manage risk and positions autonomously
-• Learn from trading history
-
-*⚠️ Real Transactions:* All trades are executed on Solana devnet
-
-Click "Start Agent" to activate me."""
-    
-    await update.message.reply_text(welcome, parse_mode="Markdown", reply_markup=main_menu())
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle button clicks"""
-    query = update.callback_query
-    await query.answer()
-    
-    chat_id = query.message.chat_id
-    agent = swarm.get_agent(chat_id)
-    
-    if query.data == "start_agent":
-        # Initialize agent first
-        await agent.initialize()
-        
-        if swarm.start_agent(agent.agent_id, context.bot):
-            await query.edit_message_text(
-                f"🟢 Agent {agent.agent_id} activated!\n\n"
-                f"Address: `{agent.address}`\n\n"
-                f"Fund this wallet with devnet SOL:\n"
-                f"https://faucet.solana.com/",
-                parse_mode="Markdown",
-                reply_markup=main_menu()
-            )
-        else:
-            await query.edit_message_text("Already running!", reply_markup=main_menu())
-    
-    elif query.data == "stop_agent":
-        if swarm.stop_agent(agent.agent_id):
-            await query.edit_message_text("🛑 Agent stopped.", reply_markup=main_menu())
-        else:
-            await query.edit_message_text("Not running.", reply_markup=main_menu())
-    
-    elif query.data == "wallet":
-        balance = await agent.get_balance()
-        text = (
-            f"💳 *Wallet Info*\n\n"
-            f"Address: `{agent.address}`\n"
-            f"SOL: `{balance:.4f}`\n\n"
-            f"[View on Solscan](https://solscan.io/account/{agent.address}?cluster=devnet)"
-        )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
-    
-    elif query.data == "status":
-        status = agent.get_status()
-        text = (
-            f"📊 *Agent Status*\n\n"
-            f"ID: `{status['agent_id']}`\n"
-            f"Status: {'🟢 Running' if status['is_running'] else '🔴 Stopped'}\n"
-            f"Loops: `{status['loop_count']}`\n"
-            f"Positions: `{status['positions_count']}`\n"
-            f"Total PnL: `{status['total_pnl']:.6f}`\n"
-            f"Win Rate: `{status['win_rate']*100:.1f}%`\n"
-            f"Trades: `{status['total_trades']}`"
-        )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
-    
-    elif query.data == "positions":
-        if not agent.positions:
-            text = "No active positions."
-        else:
-            text = "📈 *Active Positions*\n\n"
-            for i, pos in enumerate(agent.positions, 1):
-                text += (
-                    f"*{i}. Position*\n"
-                    f"Entry: `{pos.entry_price:.10f}`\n"
-                    f"Amount: `{pos.amount:.6f}`\n"
-                    f"TP: `{pos.take_profit:.10f}` | SL: `{pos.stop_loss:.10f}`\n\n"
-                )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
-    
-    elif query.data == "history":
-        if not agent.trade_history:
-            text = "No trades yet."
-        else:
-            text = "📜 *Recent Trades*\n\n"
-            for trade in agent.trade_history[-5:]:
-                emoji = "🟢" if trade.get('pnl', 0) > 0 else "🔴" if trade.get('pnl', 0) < 0 else "⚪"
-                text += (
-                    f"{emoji} *{trade['action']}* at `{trade['price']:.10f}`\n"
-                    f"PnL: `{trade.get('pnl', 0):.6f}` | Conf: `{trade.get('ai_confidence', 0)}%`\n"
-                    f"[Tx](https://solscan.io/tx/{trade['tx_signature']}?cluster=devnet)\n\n"
-                )
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
-    
-    elif query.data == "airdrop":
-        sig = await agent.request_airdrop(2.0)
-        if sig:
-            text = f"✅ Airdrop requested!\nTx: `{sig[:30]}...`"
-        else:
-            text = "❌ Airdrop failed. Try manually at https://faucet.solana.com/"
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
-
-
-# Web server for health checks
-async def health_check(request):
-    return web.Response(text=json.dumps({
-        "status": "healthy",
-        "agents": len(swarm.agents),
-        "running": sum(1 for a in swarm.agents.values() if a.is_running)
-    }), content_type="application/json")
-
-
-async def agent_status_api(request):
-    """API endpoint for agent status"""
-    return web.Response(text=json.dumps({
-        "agents": swarm.get_all_status()
-    }), content_type="application/json")
-
-
-async def main():
-    """Main entry point"""
-    # Setup web server
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
-    app.router.add_get("/api/agents", agent_status_api)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logger.info(f"Web server started on port {PORT}")
-    
-    # Setup Telegram bot (if token available)
-    if TELEGRAM_TOKEN:
-        telegram_app = Application.builder().token(TELEGRAM_TOKEN).build()
-        telegram_app.add_handler(CommandHandler("start", start_command))
-        telegram_app.add_handler(CallbackQueryHandler(button_handler))
-        
-        await telegram_app.initialize()
-        await telegram_app.start()
-        await telegram_app.updater.start_polling(drop_pending_updates=True)
-        logger.info("Telegram bot started")
-    else:
-        logger.info("No Telegram token - running in API-only mode")
-    
-    logger.info("=" * 60)
-    logger.info("AUTONOMOUS AGENTIC WALLET SYSTEM READY")
-    logger.info("=" * 60)
-    
-    # Keep running
-    while True:
-        await asyncio.sleep(3600)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                logger.info(f"📊 Price: {market.current_price:.10f} | Trend
