@@ -170,7 +170,7 @@ class OrcaPool:
     token_vault_a: Optional[str] = None
     token_vault_b: Optional[str] = None
     
-        def get_price(self) -> float:
+    def get_price(self) -> float:
         """Calculate price from sqrt_price_x64"""
         if self.sqrt_price_x64 == 0:
             return 1.0  # Default price instead of 0
