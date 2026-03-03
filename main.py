@@ -1,3 +1,9 @@
+"""
+Autonomous Agentic Wallet System for Solana
+Competition-grade implementation with Orca DEX integration
+Real transactions on devnet - no simulations
+"""
+
 import os
 import asyncio
 import json
@@ -100,8 +106,8 @@ MAX_POSITION_SIZE_PCT = 50
 DEFAULT_SLIPPAGE_BPS = 100  # 1%
 
 # Tick array constants for Orca
-TICK_ARRAY_SIZE = 88  # Tick array account size
-TICK_ARRAY_STRIDE = 88  # Number of ticks per array
+TICK_ARRAY_SIZE = 88
+TICK_ARRAY_STRIDE = 88
 
 
 class ActionType(Enum):
@@ -165,11 +171,20 @@ class OrcaPool:
     token_vault_b: Optional[str] = None
     
     def get_price(self) -> float:
-        """Calculate price from sqrt_price_x64"""
+        """Calculate price from sqrt_price_x64 with sanity checks"""
         if self.sqrt_price_x64 == 0:
             return 0.0
+        
+        # Q64.64 fixed point math
         sqrt_price = self.sqrt_price_x64 / (2 ** 64)
-        return sqrt_price ** 2
+        price = sqrt_price ** 2
+        
+        # Sanity check - if price is insane, return 0 to skip this pool
+        if price > 1e10 or price < 1e-10 or math.isnan(price) or math.isinf(price):
+            logger.warning(f"Invalid price calculated: {price}, sqrt_price_x64: {self.sqrt_price_x64}")
+            return 0.0
+        
+        return price
 
 
 class SecureKeyManager:
@@ -301,14 +316,13 @@ class SolanaClient:
             logger.info(f"Creating ATA for mint {mint}...")
             
             # Build create ATA instruction data
-            # Instruction 0 = CreateIdempotent
             data = bytes([1])  # 1 = CreateIdempotent
             
             accounts = [
-                {"pubkey": payer.pubkey(), "is_signer": True, "is_writable": True},  # payer
-                {"pubkey": ata, "is_signer": False, "is_writable": True},  # ata
-                {"pubkey": owner, "is_signer": False, "is_writable": False},  # owner
-                {"pubkey": mint, "is_signer": False, "is_writable": False},  # mint
+                {"pubkey": payer.pubkey(), "is_signer": True, "is_writable": True},
+                {"pubkey": ata, "is_signer": False, "is_writable": True},
+                {"pubkey": owner, "is_signer": False, "is_writable": False},
+                {"pubkey": mint, "is_signer": False, "is_writable": False},
                 {"pubkey": SYSTEM_PROGRAM_ID, "is_signer": False, "is_writable": False},
                 {"pubkey": TOKEN_PROGRAM_ID, "is_signer": False, "is_writable": False},
             ]
@@ -379,8 +393,6 @@ class SolanaClient:
 # Helper functions for tick math
 def tick_index_to_sqrt_price_x64(tick_index: int) -> int:
     """Convert tick index to sqrt price (x64 format)"""
-    # Price = 1.0001^tick
-    # sqrt_price = sqrt(1.0001^tick) = 1.0001^(tick/2)
     price = (1.0001 ** tick_index) ** 0.5
     return int(price * (2 ** 64))
 
@@ -408,8 +420,10 @@ def get_tick_array_address(whirlpool: Pubkey, start_tick_index: int) -> Pubkey:
     pubkey, _ = Pubkey.find_program_address(seeds, ORCA_WHIRLPOOL_PROGRAM_ID)
     return pubkey
 
+
+
 class OrcaWhirlpoolClient:
-    """Real Orca Whirlpools DEX integration with proper tick array handling"""
+    """Real Orca Whirlpools DEX integration with FIXED pool parsing"""
     
     def __init__(self, solana_client: SolanaClient):
         self.solana = solana_client
@@ -418,7 +432,7 @@ class OrcaWhirlpoolClient:
         self.best_pool: Optional[OrcaPool] = None
     
     async def load_pool(self, pool_config: Dict) -> Optional[OrcaPool]:
-        """Load a specific pool from the blockchain with proper parsing"""
+        """Load a specific pool from the blockchain - FIXED VERSION"""
         try:
             pool_pubkey = Pubkey.from_string(pool_config["address"])
             
@@ -440,60 +454,89 @@ class OrcaWhirlpoolClient:
             
             data = resp.value.data
             
-            # Verify discriminator (first 8 bytes)
-            expected_discriminator = bytes([142, 69, 61, 87, 240, 225, 217, 77])
-            if len(data) < 8 or data[:8] != expected_discriminator:
-                logger.warning(f"Invalid discriminator for pool {pool_config['address']}")
-                # Continue anyway - might be different layout
+            # Check minimum data length
+            if len(data) < 500:
+                logger.warning(f"Pool data too short: {len(data)} bytes")
+                return None
             
-            # Parse Whirlpool account data
-            # Layout: https://github.com/orca-so/whirlpools/blob/main/sdk/src/types/public/anchor-types.ts
+            # Try to parse without strict discriminator check (devnet pools vary)
+            # Whirlpool account layout (Anchor):
+            # https://github.com/orca-so/whirlpools/blob/main/sdk/src/types/public/anchor-types.ts
             
-            offset = 8  # Skip discriminator
+            # Skip discriminator (8 bytes)
+            offset = 8
             
-            # Read pubkeys (32 bytes each)
-            whirlpools_config = Pubkey.from_bytes(data[offset:offset+32])
-            offset += 32
+            try:
+                # Read pubkeys (32 bytes each)
+                whirlpools_config = Pubkey.from_bytes(data[offset:offset+32]); offset += 32
+                token_mint_a = Pubkey.from_bytes(data[offset:offset+32]); offset += 32
+                token_mint_b = Pubkey.from_bytes(data[offset:offset+32]); offset += 32
+                token_vault_a = Pubkey.from_bytes(data[offset:offset+32]); offset += 32
+                token_vault_b = Pubkey.from_bytes(data[offset:offset+32]); offset += 32
+                
+                # Skip fee_growth_global_a (16 bytes) and fee_growth_global_b (16 bytes)
+                offset += 32
+                
+                # Skip reward_last_updated_timestamp (8 bytes)
+                offset += 8
+                
+                # Skip reward_infos (3 * 80 = 240 bytes)
+                offset += 240
+                
+                # Read liquidity (16 bytes, u128)
+                liquidity = int.from_bytes(data[offset:offset+16], 'little'); offset += 16
+                
+                # Read sqrt_price_x64 (16 bytes, u128) - THIS IS THE PRICE!
+                sqrt_price_x64 = int.from_bytes(data[offset:offset+16], 'little'); offset += 16
+                
+                # Read tick_current_index (4 bytes, i32)
+                tick_current_index = int.from_bytes(data[offset:offset+4], 'little', signed=True); offset += 4
+                
+                # Skip observation_index (2 bytes) and observation_update_duration (2 bytes)
+                offset += 4
+                
+                # Read fee_rate (2 bytes, u16)
+                fee_rate = int.from_bytes(data[offset:offset+2], 'little')
+                
+            except IndexError as e:
+                logger.error(f"Data parsing error - buffer too short at offset {offset}: {e}")
+                return None
             
-            token_mint_a = Pubkey.from_bytes(data[offset:offset+32])
-            offset += 32
+            # Validate the data makes sense
+            if sqrt_price_x64 == 0:
+                logger.warning(f"Pool {pool_config['address']} has zero sqrt_price")
+                return None
             
-            token_mint_b = Pubkey.from_bytes(data[offset:offset+32])
-            offset += 32
+            # Calculate price with sanity check
+            sqrt_price = sqrt_price_x64 / (2 ** 64)
+            price = sqrt_price ** 2
             
-            token_vault_a = Pubkey.from_bytes(data[offset:offset+32])
-            offset += 32
+            # If price is insane, try alternative offset (some pools use older layout)
+            if price > 1e20 or price < 1e-20 or math.isnan(price) or math.isinf(price):
+                logger.warning(f"Insane price from standard offset: {price}")
+                logger.info("Trying alternative offset (old layout)...")
+                
+                try:
+                    # Try reading from offset 269 (older layout)
+                    alt_sqrt_price = int.from_bytes(data[269:285], 'little')
+                    if 0 < alt_sqrt_price < 2**128:
+                        alt_sqrt = alt_sqrt_price / (2 ** 64)
+                        alt_price = alt_sqrt ** 2
+                        if 1e-10 < alt_price < 1e10:
+                            sqrt_price_x64 = alt_sqrt_price
+                            sqrt_price = alt_sqrt
+                            price = alt_price
+                            logger.info(f"Alternative offset worked! Price: {price}")
+                        else:
+                            logger.warning(f"Alternative price also insane: {alt_price}")
+                            return None
+                    else:
+                        return None
+                except Exception as e:
+                    logger.error(f"Alternative offset failed: {e}")
+                    return None
             
-            token_vault_b = Pubkey.from_bytes(data[offset:offset+32])
-            offset += 32
-            
-            # Skip fee_growth_global_a (16 bytes) and fee_growth_global_b (16 bytes)
-            offset += 32
-            
-            # Skip reward_last_updated_timestamp (8 bytes)
-            offset += 8
-            
-            # Skip reward_infos (3 * 80 = 240 bytes)
-            offset += 240
-            
-            # Read liquidity (u128 = 16 bytes)
-            liquidity = int.from_bytes(data[offset:offset+16], 'little')
-            offset += 16
-            
-            # Read sqrt_price_x64 (u128 = 16 bytes)
-            sqrt_price_x64 = int.from_bytes(data[offset:offset+16], 'little')
-            offset += 16
-            
-            # Read tick_current_index (i32 = 4 bytes)
-            tick_current_index = int.from_bytes(data[offset:offset+4], 'little', signed=True)
-            offset += 4
-            
-            # Skip observation_index (2 bytes) and observation_update_duration (2 bytes)
-            offset += 4
-            
-            # Read fee_rate (u16 = 2 bytes)
-            fee_rate = int.from_bytes(data[offset:offset+2], 'little')
-            
+            # Create pool object
             pool = OrcaPool(
                 address=pool_config["address"],
                 token_a=str(token_mint_a),
@@ -507,9 +550,14 @@ class OrcaWhirlpoolClient:
                 token_vault_b=str(token_vault_b)
             )
             
-            price = pool.get_price()
+            # Final validation
+            final_price = pool.get_price()
+            if final_price == 0:
+                logger.warning(f"Pool {pool_config['address']} rejected due to invalid price")
+                return None
+            
             logger.info(f"✓ Loaded pool {pool_config['address'][:20]}...")
-            logger.info(f"  Price: {price:.10f}")
+            logger.info(f"  Price: {final_price:.10f}")
             logger.info(f"  Liquidity: {liquidity}")
             logger.info(f"  Tick: {tick_current_index}")
             logger.info(f"  Token A: {str(token_mint_a)[:20]}...")
@@ -529,30 +577,37 @@ class OrcaWhirlpoolClient:
         logger.info("=" * 60)
         
         loaded_count = 0
+        valid_pools = []
+        
         for name, config in DEVNET_POOLS.items():
             try:
                 pool = await self.load_pool(config)
-                if pool and pool.liquidity > 0:
-                    self.pools[name] = pool
-                    loaded_count += 1
-                    logger.info(f"  ✓ Pool {name}: ACTIVE (liquidity: {pool.liquidity})")
-                elif pool:
-                    logger.warning(f"  ⚠ Pool {name}: Zero liquidity")
+                if pool:
+                    # Only accept pools with valid prices
+                    price = pool.get_price()
+                    if price > 0:
+                        self.pools[name] = pool
+                        valid_pools.append(pool)
+                        loaded_count += 1
+                        logger.info(f"  ✓ Pool {name}: ACTIVE (price: {price:.6f})")
+                    else:
+                        logger.warning(f"  ✗ Pool {name}: Invalid price rejected")
                 else:
                     logger.warning(f"  ✗ Pool {name}: Failed to load")
             except Exception as e:
                 logger.error(f"  ✗ Pool {name}: Error - {e}")
         
-        if self.pools:
+        if valid_pools:
             # Select pool with highest liquidity
-            self.best_pool = max(self.pools.values(), key=lambda p: p.liquidity)
+            self.best_pool = max(valid_pools, key=lambda p: p.liquidity)
+            best_price = self.best_pool.get_price()
             logger.info(f"✓ Selected best pool: {self.best_pool.address[:20]}...")
-            logger.info(f"✓ Best pool price: {self.best_pool.get_price():.10f}")
-            logger.info(f"✓ Total pools loaded: {len(self.pools)}")
+            logger.info(f"✓ Best pool price: {best_price:.10f}")
+            logger.info(f"✓ Total valid pools: {len(valid_pools)}")
             return True
         else:
-            logger.error("✗ CRITICAL: No pools loaded!")
-            logger.error("Cannot proceed with trading - check RPC connection and pool addresses")
+            logger.error("✗ CRITICAL: No valid pools loaded!")
+            logger.error("Cannot proceed with trading")
             return False
     
     def get_price(self) -> Optional[float]:
@@ -589,7 +644,7 @@ class OrcaWhirlpoolClient:
         next_array = get_tick_array_address(whirlpool, next_start_tick)
         tick_arrays.append(next_array)
         
-        # Add one more for safety (large swaps might cross multiple arrays)
+        # Add one more for safety
         if a_to_b:
             third_start_tick = next_start_tick - ticks_per_array
         else:
@@ -616,6 +671,12 @@ class OrcaWhirlpoolClient:
             logger.error("No pool available for swap")
             return None
         
+        # Validate pool has reasonable price
+        price = self.best_pool.get_price()
+        if price == 0 or price > 1e10:
+            logger.error(f"Cannot swap - invalid pool price: {price}")
+            return None
+        
         try:
             owner = keypair.pubkey()
             pool_pubkey = Pubkey.from_string(self.best_pool.address)
@@ -631,7 +692,7 @@ class OrcaWhirlpoolClient:
                 token_out = token_mint_b
                 token_vault_in = token_vault_a
                 token_vault_out = token_vault_b
-                decimals_in = 9  # Most devnet tokens use 9 decimals
+                decimals_in = 9
             else:
                 token_in = token_mint_b
                 token_out = token_mint_a
@@ -647,12 +708,17 @@ class OrcaWhirlpoolClient:
             logger.info(f"Amount: {amount_in} tokens ({amount_in_lamports} lamports)")
             logger.info(f"Direction: {'A->B' if is_a_to_b else 'B->A'}")
             logger.info(f"Pool: {self.best_pool.address}")
-            logger.info(f"Slippage: {slippage_bps} bps ({slippage_bps/100}%)")
+            logger.info(f"Pool Price: {price:.10f}")
+            logger.info(f"Slippage: {slippage_bps} bps")
             
             # Get or create token accounts
             logger.info("Setting up token accounts...")
-            token_account_in = await self.solana.get_or_create_ata(owner, token_in, keypair)
-            token_account_out = await self.solana.get_or_create_ata(owner, token_out, keypair)
+            try:
+                token_account_in = await self.solana.get_or_create_ata(owner, token_in, keypair)
+                token_account_out = await self.solana.get_or_create_ata(owner, token_out, keypair)
+            except Exception as e:
+                logger.error(f"Failed to setup token accounts: {e}")
+                return None
             
             logger.info(f"  Token In ATA: {token_account_in}")
             logger.info(f"  Token Out ATA: {token_account_out}")
@@ -664,14 +730,6 @@ class OrcaWhirlpoolClient:
                 self.best_pool.tick_spacing,
                 is_a_to_b
             )
-            
-            # Calculate minimum output (slippage protection)
-            # For now, set to 0 (accept any output) - in production, calculate properly
-            other_amount_threshold = 0
-            
-            # Calculate sqrt price limit
-            # For now, set to 0 (no limit) - in production, calculate based on slippage
-            sqrt_price_limit = 0
             
             # Build swap instruction
             swap_ix = self._build_swap_instruction(
@@ -685,10 +743,10 @@ class OrcaWhirlpoolClient:
                 tick_array_0=tick_arrays[0],
                 tick_array_1=tick_arrays[1],
                 tick_array_2=tick_arrays[2],
-                oracle=tick_arrays[0],  # Oracle is typically tick_array_0
+                oracle=tick_arrays[0],
                 amount=amount_in_lamports,
-                other_amount_threshold=other_amount_threshold,
-                sqrt_price_limit=sqrt_price_limit,
+                other_amount_threshold=0,  # Accept any output for testing
+                sqrt_price_limit=0,  # No limit
                 amount_specified_is_input=True,
                 a_to_b=is_a_to_b
             )
@@ -697,9 +755,9 @@ class OrcaWhirlpoolClient:
             logger.info("Building transaction...")
             blockhash = await self.solana.get_latest_blockhash()
             
-            # Add compute budget for priority
+            # Add compute budget
             compute_budget_ix = set_compute_unit_limit(400000)
-            compute_price_ix = set_compute_unit_price(100000)  # 0.0001 SOL priority fee
+            compute_price_ix = set_compute_unit_price(100000)
             
             message = MessageV0.try_compile(
                 payer=owner,
@@ -710,12 +768,12 @@ class OrcaWhirlpoolClient:
             
             tx = VersionedTransaction(message, [keypair])
             
-            # Simulate first (safety check)
+            # Simulate first
             logger.info("Simulating transaction...")
             success, error = await self.solana.simulate_transaction(tx)
             if not success:
                 logger.error(f"Simulation failed: {error}")
-                logger.error("Swap aborted - transaction would fail")
+                logger.error("Swap aborted")
                 return None
             
             logger.info("✓ Simulation passed!")
@@ -729,7 +787,6 @@ class OrcaWhirlpoolClient:
             logger.info(f"=" * 60)
             logger.info(f"Transaction Signature: {signature}")
             logger.info(f"View on Solscan: https://solscan.io/tx/{signature}?cluster=devnet")
-            logger.info(f"View on Explorer: https://explorer.solana.com/tx/{signature}?cluster=devnet")
             logger.info(f"=" * 60)
             
             return signature
@@ -758,20 +815,12 @@ class OrcaWhirlpoolClient:
         amount_specified_is_input: bool,
         a_to_b: bool
     ) -> Instruction:
-        """Build Orca Whirlpools swap instruction with correct account ordering"""
+        """Build Orca Whirlpools swap instruction"""
         
         # Swap instruction discriminator (Anchor)
-        # sha256("global:swap")[:8]
         discriminator = bytes([248, 198, 158, 145, 225, 117, 135, 200])
         
         # Build instruction data
-        # 1. discriminator (8 bytes)
-        # 2. amount (u64, 8 bytes)
-        # 3. other_amount_threshold (u64, 8 bytes)
-        # 4. sqrt_price_limit (u128, 16 bytes)
-        # 5. amount_specified_is_input (bool, 1 byte)
-        # 6. a_to_b (bool, 1 byte)
-        
         data = discriminator
         data += amount.to_bytes(8, 'little')
         data += other_amount_threshold.to_bytes(8, 'little')
@@ -779,33 +828,29 @@ class OrcaWhirlpoolClient:
         data += bytes([1 if amount_specified_is_input else 0])
         data += bytes([1 if a_to_b else 0])
         
-        # Account metas - MUST be in correct order per Orca Whirlpools IDL
+        # Account metas
         accounts = [
-            {"pubkey": whirlpool, "is_signer": False, "is_writable": True},  # 0
-            {"pubkey": token_program, "is_signer": False, "is_writable": False},  # 1
-            {"pubkey": token_authority, "is_signer": True, "is_writable": False},  # 2
-            {"pubkey": token_owner_account_a, "is_signer": False, "is_writable": True},  # 3
-            {"pubkey": token_vault_a, "is_signer": False, "is_writable": True},  # 4
-            {"pubkey": token_owner_account_b, "is_signer": False, "is_writable": True},  # 5
-            {"pubkey": token_vault_b, "is_signer": False, "is_writable": True},  # 6
-            {"pubkey": tick_array_0, "is_signer": False, "is_writable": True},  # 7
-            {"pubkey": tick_array_1, "is_signer": False, "is_writable": True},  # 8
-            {"pubkey": tick_array_2, "is_signer": False, "is_writable": True},  # 9
-            {"pubkey": oracle, "is_signer": False, "is_writable": False},  # 10
+            {"pubkey": whirlpool, "is_signer": False, "is_writable": True},
+            {"pubkey": token_program, "is_signer": False, "is_writable": False},
+            {"pubkey": token_authority, "is_signer": True, "is_writable": False},
+            {"pubkey": token_owner_account_a, "is_signer": False, "is_writable": True},
+            {"pubkey": token_vault_a, "is_signer": False, "is_writable": True},
+            {"pubkey": token_owner_account_b, "is_signer": False, "is_writable": True},
+            {"pubkey": token_vault_b, "is_signer": False, "is_writable": True},
+            {"pubkey": tick_array_0, "is_signer": False, "is_writable": True},
+            {"pubkey": tick_array_1, "is_signer": False, "is_writable": True},
+            {"pubkey": tick_array_2, "is_signer": False, "is_writable": True},
+            {"pubkey": oracle, "is_signer": False, "is_writable": False},
         ]
         
-        logger.info(f"Swap instruction accounts ({len(accounts)} total):")
-        for i, acc in enumerate(accounts):
-            writable = "W" if acc["is_writable"] else "R"
-            signer = "S" if acc["is_signer"] else "-"
-            logger.info(f"  [{i}] {writable}{signer} {str(acc['pubkey'])[:20]}...")
+        logger.info(f"Swap instruction: {len(accounts)} accounts")
         
         return Instruction(
             program_id=self.program_id,
             accounts=accounts,
             data=data
-        )
-        
+                )
+
 
 class AIOracle:
     """AI decision engine using OpenRouter"""
@@ -920,6 +965,16 @@ Respond with JSON:
         positions = context.get('positions', [])
         balance = context.get('balance_sol', 0)
         
+        # Need price history for trend detection
+        if len(market_state.price_history) < 10:
+            return TradeDecision(
+                action=ActionType.WAIT,
+                confidence=50,
+                amount_percent=0,
+                reasoning="Fallback: Insufficient price history",
+                risk_assessment="Neutral - waiting for data"
+            )
+        
         # Simple trend following
         if market_state.trend == "UPTREND" and not positions and balance > 0.01:
             return TradeDecision(
@@ -1003,7 +1058,6 @@ class AgenticWallet:
         success = await self.orca.initialize()
         if not success:
             logger.error("CRITICAL: Failed to initialize Orca pools")
-            logger.error("The agent cannot trade without pool access")
             return False
         
         # Check balance
@@ -1030,8 +1084,8 @@ class AgenticWallet:
         try:
             price = self.orca.get_price()
             
-            if not price:
-                logger.error("No price available from Orca pools")
+            if not price or price <= 0:
+                logger.error("No valid price available from Orca pools")
                 return None
             
             self.price_history.append({
@@ -1105,7 +1159,7 @@ class AgenticWallet:
         
         return {
             "balance_sol": await self.get_balance(),
-            "token_a_balance": 0.0,  # Would fetch actual token balances
+            "token_a_balance": 0.0,
             "token_b_balance": 0.0,
             "positions": self.positions,
             "unrealized_pnl": unrealized,
@@ -1142,9 +1196,9 @@ class AgenticWallet:
                 return None
             
             # Calculate trade amount
-            trade_amount = balance * (decision.amount_percent / 100) * 0.9  # Keep 10% for fees
-            trade_amount = max(trade_amount, 0.001)  # Minimum 0.001 SOL worth
-            trade_amount = min(trade_amount, balance - 0.01)  # Keep some SOL for gas
+            trade_amount = balance * (decision.amount_percent / 100) * 0.9
+            trade_amount = max(trade_amount, 0.001)
+            trade_amount = min(trade_amount, balance - 0.01)
             
             logger.info(f"Opening position: {trade_amount:.6f} SOL worth")
             
@@ -1156,7 +1210,6 @@ class AgenticWallet:
             )
             
             if sig:
-                # Record position
                 position = Position(
                     entry_price=market.current_price,
                     amount=trade_amount / market.current_price,
@@ -1171,8 +1224,7 @@ class AgenticWallet:
                 
                 self._record_trade("BUY", market.current_price, trade_amount, sig, decision)
                 
-                logger.info(f"✓ Position opened successfully!")
-                logger.info(f"  Tx: {sig}")
+                logger.info(f"✓ Position opened: {sig}")
                 return sig
             
         except Exception as e:
@@ -1187,12 +1239,11 @@ class AgenticWallet:
             logger.info("No positions to close")
             return None
         
-        position = self.positions[0]  # FIFO
+        position = self.positions[0]
         
         try:
             logger.info(f"Closing position: {position.amount:.6f} tokens")
             
-            # Execute REAL swap (B to A)
             sig = await self.orca.execute_swap(
                 keypair=self.key_manager.get_or_create(self.agent_id),
                 amount_in=position.amount,
@@ -1200,7 +1251,6 @@ class AgenticWallet:
             )
             
             if sig:
-                # Calculate PnL
                 pnl = position.current_pnl(market.current_price)
                 self.total_pnl += pnl
                 
@@ -1223,7 +1273,7 @@ class AgenticWallet:
     
     async def _emergency_exit(self, market: MarketState) -> Optional[str]:
         """Emergency close all positions"""
-        logger.warning(f"AGENT {self.agent_id}: EMERGENCY EXIT TRIGGERED")
+        logger.warning(f"AGENT {self.agent_id}: EMERGENCY EXIT")
         
         signatures = []
         for position in list(self.positions):
@@ -1304,13 +1354,13 @@ class AgenticWallet:
             current_price = market.current_price
             
             if current_price >= position.take_profit:
-                logger.info(f"🎯 Take profit hit: {current_price:.10f} >= {position.take_profit:.10f}")
+                logger.info(f"🎯 Take profit hit")
                 sig = await self._close_position_at_price(position, current_price, "TAKE_PROFIT")
                 if sig:
                     closed.append(sig)
             
             elif current_price <= position.stop_loss:
-                logger.info(f"🛑 Stop loss hit: {current_price:.10f} <= {position.stop_loss:.10f}")
+                logger.info(f"🛑 Stop loss hit")
                 sig = await self._close_position_at_price(position, current_price, "STOP_LOSS")
                 if sig:
                     closed.append(sig)
@@ -1324,7 +1374,6 @@ class AgenticWallet:
         logger.info(f"=" * 60)
         logger.info(f"🚀 AGENT {self.agent_id} AUTONOMOUS LOOP STARTED")
         logger.info(f"💳 Address: {self.address}")
-        logger.info(f"🔗 RPC: {RPC_URL}")
         logger.info(f"⚠️  EXECUTING REAL TRANSACTIONS ON DEVNET")
         logger.info(f"=" * 60)
         
@@ -1335,16 +1384,16 @@ class AgenticWallet:
                 logger.info(f"LOOP {self.loop_count}")
                 logger.info(f"{'='*40}")
                 
-                # 1. Fetch market data
+                # Fetch market data
                 market = await self.fetch_market_data()
                 if not market:
                     logger.error("Failed to fetch market data - retrying in 60s")
                     await asyncio.sleep(60)
                     continue
                 
-                logger.info(f"📊 Price: {market.current_price:.10f} | Trend: {market.trend} | Vol: {market.volatility:.4f}")
+                                logger.info(f"📊 Price: {market.current_price:.10f} | Trend: {market.trend}")
                 
-                # 2. Check existing positions (TP/SL)
+                # Check existing positions
                 closed = await self.check_positions(market)
                 if closed:
                     for sig in closed:
@@ -1352,14 +1401,14 @@ class AgenticWallet:
                         if bot:
                             await self._notify_trade(bot, f"Position closed (TP/SL): `{sig[:20]}...`")
                 
-                # 3. Get AI decision
+                # Get AI decision
                 context = await self._get_context()
                 decision = await self.ai.analyze_market(market, context)
                 
                 logger.info(f"🤖 AI Decision: {decision.action.value} (confidence: {decision.confidence}%)")
                 logger.info(f"📝 Reasoning: {decision.reasoning[:80]}...")
                 
-                # 4. Execute decision
+                # Execute decision
                 sig = await self.execute_decision(decision, market)
                 
                 if sig:
@@ -1370,18 +1419,14 @@ class AgenticWallet:
                             bot,
                             f"{action_str} Executed\n"
                             f"Confidence: {decision.confidence}%\n"
-                            f"Amount: {decision.amount_percent}%\n"
                             f"Tx: `{sig[:30]}...`"
                         )
-                else:
-                    if decision.action != ActionType.WAIT:
-                        logger.warning(f"Failed to execute {decision.action.value}")
                 
-                # 5. Status update
+                # Status update
                 logger.info(f"💰 Balance: {await self.get_balance():.4f} SOL")
                 logger.info(f"📈 Positions: {len(self.positions)} | PnL: {self.total_pnl:.6f}")
                 
-                # 6. Wait before next iteration
+                # Wait before next iteration
                 logger.info(f"⏳ Waiting 60 seconds...")
                 await asyncio.sleep(60)
                 
@@ -1522,7 +1567,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent = swarm.get_agent(chat_id)
     
     if query.data == "start_agent":
-        # Initialize agent first
         success = await agent.initialize()
         
         if not success:
@@ -1674,4 +1718,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
