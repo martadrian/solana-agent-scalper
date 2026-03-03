@@ -1391,7 +1391,7 @@ class AgenticWallet:
                     await asyncio.sleep(60)
                     continue
                 
-                                logger.info(f"📊 Price: {market.current_price:.10f} | Trend: {market.trend}")
+                logger.info(f"📊 Price: {market.current_price:.10f} | Trend: {market.trend}")
                 
                 # Check existing positions
                 closed = await self.check_positions(market)
