@@ -5,7 +5,7 @@ aiohttp==3.9.1
 python-telegram-bot==20.7
 solders==0.21.0
 
-websockets==12.0
+websockets== 11.0.3 
 construct==2.10.68
 construct-typing==0.5.6
 gotrue==2.1.0
