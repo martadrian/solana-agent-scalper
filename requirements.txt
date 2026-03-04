@@ -1,24 +1,4 @@
 solana==0.35.0
 supabase==2.3.4
-httpx==0.25.2
-aiohttp==3.9.1
 python-telegram-bot==20.7
 solders==0.21.0
-
-websockets== 11.0.3 
-construct==2.10.68
-construct-typing==0.5.6
-gotrue==2.1.0
-postgrest==0.13.0
-realtime==1.0.2
-storage3==0.7.0
-supafunc==0.3.3
-
-typing-extensions==4.8.0
-anyio==3.7.1
-certifi==2023.7.22
-charset-normalizer==3.3.2
-h11==0.14.0
-httpcore==0.18.0
-idna==3.4
-sniffio==1.3.0
