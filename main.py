@@ -185,14 +185,6 @@ class OrcaPool:
         
         return price
 
-        
-        # Sanity check - if price is insane, return 0 to skip this pool
-        if price > 1e10 or price < 1e-10 or math.isnan(price) or math.isinf(price):
-            logger.warning(f"Invalid price calculated: {price}, sqrt_price_x64: {self.sqrt_price_x64}")
-            return 0.0
-        
-        return price
-
 
 class SecureKeyManager:
     """Handles secure key storage and signing operations"""
@@ -437,7 +429,8 @@ class OrcaWhirlpoolClient:
         self.program_id = ORCA_WHIRLPOOL_PROGRAM_ID
         self.pools: Dict[str, OrcaPool] = {}
         self.best_pool: Optional[OrcaPool] = None
-        async def load_pool(self, pool_config: Dict) -> Optional[OrcaPool]:
+    
+    async def load_pool(self, pool_config: Dict) -> Optional[OrcaPool]:
         """Load pool - MINIMAL VERSION for devnet compatibility"""
         try:
             pool_pubkey = Pubkey.from_string(pool_config["address"])
@@ -535,7 +528,6 @@ class OrcaWhirlpoolClient:
         except Exception as e:
             logger.error(f"Error loading pool {pool_config['address']}: {e}")
             return None
-
     
     async def initialize(self) -> bool:
         """Initialize by loading all known pools"""
@@ -816,7 +808,7 @@ class OrcaWhirlpoolClient:
             program_id=self.program_id,
             accounts=accounts,
             data=data
-                )
+        )
 
 
 class AIOracle:
@@ -1070,7 +1062,7 @@ class AgenticWallet:
             trend = self._detect_trend(prices)
             
             return MarketState(
-                current_price=price,
+                   current_price=price,
                 price_history=prices,
                 volatility=volatility,
                 trend=trend,
@@ -1685,3 +1677,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+           
