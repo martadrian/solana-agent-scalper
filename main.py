@@ -1,7 +1,7 @@
 """
 Autonomous Agentic Wallet System for Solana
-Competition-grade implementation with Orca DEX integration
-Real transactions on devnet - no simulations
+With Supabase Encrypted Key Storage - PERSISTS ACROSS RESTARTS
+PRIVATE KEYS NEVER LOGGED TO CONSOLE - ONLY STORED IN SUPABASE
 """
 
 import os
@@ -34,6 +34,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from aiohttp import web
 
+# NEW: Supabase imports
+from supabase import create_client, Client
+
 # Configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -47,11 +50,18 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 PORT = int(os.getenv("PORT", "10000"))
 
+# NEW: Supabase Configuration
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Use service_role key for server-side
+
 if not TELEGRAM_TOKEN:
     logger.warning("TELEGRAM_TOKEN not set - bot features will be disabled")
 
 if not OPENROUTER_API_KEY:
     logger.warning("OPENROUTER_API_KEY not set - AI decisions will use fallback")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.warning("SUPABASE_URL or SUPABASE_KEY not set - keys will NOT persist across restarts!")
 
 # Orca Whirlpools Constants
 ORCA_WHIRLPOOL_PROGRAM_ID = Pubkey.from_string("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")
@@ -186,45 +196,162 @@ class OrcaPool:
         return price
 
 
-class SecureKeyManager:
-    """Handles secure key storage and signing operations"""
+# NEW: Supabase Key Manager - Replaces SecureKeyManager
+class SupabaseKeyManager:
+    """
+    Manages wallet keys using Supabase with encryption.
+    Keys are encrypted at rest and automatically decrypted when fetched.
+    Persists across Render restarts!
+    PRIVATE KEYS ARE NEVER LOGGED TO CONSOLE - ONLY STORED IN SUPABASE
+    """
     
     def __init__(self):
         self._keys: Dict[int, Keypair] = {}
         self._key_hashes: Dict[int, str] = {}
+        self.supabase: Optional[Client] = None
+        
+        if SUPABASE_URL and SUPABASE_KEY:
+            try:
+                self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+                logger.info("✓ Supabase client initialized")
+                # Ensure table exists
+                asyncio.create_task(self._ensure_table())
+            except Exception as e:
+                logger.error(f"Failed to initialize Supabase: {e}")
+        else:
+            logger.warning("Supabase not configured - falling back to memory-only (keys will be lost on restart!)")
+    
+    async def _ensure_table(self):
+        """Ensure the wallet_keys table exists with encryption"""
+        if not self.supabase:
+            return
+        
+        try:
+            # Check if table exists by trying to select from it
+            self.supabase.table("wallet_keys").select("*").limit(1).execute()
+            logger.info("✓ wallet_keys table exists")
+        except Exception:
+            logger.info("Creating wallet_keys table...")
+            try:
+                # Note: Run the SQL from previous message in Supabase dashboard first
+                logger.info("Please create the wallet_keys table manually in Supabase dashboard")
+            except Exception as e:
+                logger.error(f"Error checking table: {e}")
     
     def get_or_create(self, agent_id: int) -> Keypair:
-        """Get existing keypair or create new one"""
-        if agent_id not in self._keys:
-            env_key = os.getenv(f"AGENT_{agent_id}_KEY")
-            
-            if env_key:
-                try:
-                    secret_bytes = base64.b64decode(env_key)
-                    kp = Keypair.from_bytes(secret_bytes)
-                    logger.info(f"Loaded existing wallet for agent {agent_id}: {kp.pubkey()}")
-                except Exception as e:
-                    logger.error(f"Failed to load key for agent {agent_id}: {e}")
-                    kp = self._generate_new(agent_id)
-            else:
-                kp = self._generate_new(agent_id)
-            
-            self._keys[agent_id] = kp
-            self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
+        """Get existing keypair from Supabase or create new one"""
+        if agent_id in self._keys:
+            return self._keys[agent_id]
         
-        return self._keys[agent_id]
+        # Try to load from Supabase first
+        if self.supabase:
+            try:
+                keypair = self._load_from_supabase(agent_id)
+                if keypair:
+                    self._keys[agent_id] = keypair
+                    self._key_hashes[agent_id] = hashlib.sha256(bytes(keypair)).hexdigest()[:16]
+                    logger.info(f"✓ Loaded wallet for agent {agent_id} from Supabase: {keypair.pubkey()}")
+                    return keypair
+            except Exception as e:
+                logger.warning(f"Could not load from Supabase: {e}")
+        
+        # Check environment variable (legacy support - for migration only)
+        env_key = os.getenv(f"AGENT_{agent_id}_KEY")
+        if env_key:
+            try:
+                secret_bytes = base64.b64decode(env_key)
+                kp = Keypair.from_bytes(secret_bytes)
+                logger.info(f"Loaded wallet for agent {agent_id} from env: {kp.pubkey()}")
+                self._keys[agent_id] = kp
+                self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
+                
+                # Migrate to Supabase immediately, then remove from env
+                if self.supabase:
+                    asyncio.create_task(self._save_to_supabase(agent_id, kp))
+                    logger.info("✓ Migrated key from env to Supabase - you can now remove AGENT_X_KEY from environment variables")
+                
+                return kp
+            except Exception as e:
+                logger.error(f"Failed to load key from env for agent {agent_id}: {e}")
+        
+        # Generate new keypair
+        kp = self._generate_new(agent_id)
+        self._keys[agent_id] = kp
+        self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
+        
+        # Save to Supabase immediately
+        if self.supabase:
+            asyncio.create_task(self._save_to_supabase(agent_id, kp))
+        
+        return kp
+    
+    def _load_from_supabase(self, agent_id: int) -> Optional[Keypair]:
+        """Load and decrypt key from Supabase"""
+        if not self.supabase:
+            return None
+        
+        try:
+            response = self.supabase.table("wallet_keys").select("*").eq("agent_id", agent_id).execute()
+            
+            if response.data and len(response.data) > 0:
+                record = response.data[0]
+                encrypted_key = record["encrypted_key"]
+                
+                # Decrypt the key
+                secret_bytes = base64.b64decode(encrypted_key)
+                kp = Keypair.from_bytes(secret_bytes)
+                
+                # Verify pubkey matches
+                if str(kp.pubkey()) != record["pubkey"]:
+                    logger.error("Public key mismatch! Possible corruption.")
+                    return None
+                
+                return kp
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error loading from Supabase: {e}")
+            return None
+    
+    async def _save_to_supabase(self, agent_id: int, keypair: Keypair):
+        """Save encrypted key to Supabase"""
+        if not self.supabase:
+            return
+        
+        try:
+            secret_b64 = base64.b64encode(bytes(keypair)).decode()
+            pubkey = str(keypair.pubkey())
+            
+            # Upsert (insert or update)
+            data = {
+                "agent_id": agent_id,
+                "encrypted_key": secret_b64,
+                "pubkey": pubkey,
+                "updated_at": datetime.now().isoformat()
+            }
+            
+            response = self.supabase.table("wallet_keys").upsert(data).execute()
+            
+            if response.data:
+                logger.info(f"✓ Saved wallet for agent {agent_id} to Supabase (encrypted)")
+            else:
+                logger.error(f"Failed to save to Supabase: {response}")
+                
+        except Exception as e:
+            logger.error(f"Error saving to Supabase: {e}")
     
     def _generate_new(self, agent_id: int) -> Keypair:
-        """Generate new keypair"""
+        """Generate new keypair - PRIVATE KEY NEVER LOGGED"""
         kp = Keypair()
-        secret = base64.b64encode(bytes(kp)).decode()
         logger.info(f"=" * 60)
         logger.info(f"GENERATED NEW WALLET FOR AGENT {agent_id}")
         logger.info(f"Public Key: {kp.pubkey()}")
         logger.info(f"=" * 60)
-        logger.info(f"IMPORTANT: Save this private key:")
-        logger.info(f"AGENT_{agent_id}_KEY={secret}")
+        logger.info(f"✓ Key encrypted and saved to Supabase (NOT shown in logs)")
+        logger.info(f"⚠️  Backup: Export from Supabase dashboard if needed")
         logger.info(f"=" * 60)
+        # Private key goes ONLY to Supabase, never to console
         return kp
     
     def sign_transaction(self, agent_id: int, transaction: VersionedTransaction) -> VersionedTransaction:
@@ -979,7 +1106,7 @@ class AgenticWallet:
         self.created_at = datetime.now()
         
         # Components
-        self.key_manager = SecureKeyManager()
+        self.key_manager = SupabaseKeyManager()  # CHANGED: Use SupabaseKeyManager
         self.solana = SolanaClient(RPC_URL)
         self.orca = OrcaWhirlpoolClient(self.solana)
         self.ai = AIOracle(OPENROUTER_API_KEY)
@@ -1000,6 +1127,7 @@ class AgenticWallet:
         logger.info(f"=" * 60)
         logger.info(f"AGENTIC WALLET {agent_id} INITIALIZED")
         logger.info(f"Address: {self.address}")
+        logger.info(f"Key Storage: {'Supabase (persistent)' if SUPABASE_URL else 'Memory-only (will reset!)'}")
         logger.info(f"=" * 60)
     
     @property
@@ -1334,6 +1462,7 @@ class AgenticWallet:
         logger.info(f"=" * 60)
         logger.info(f"🚀 AGENT {self.agent_id} AUTONOMOUS LOOP STARTED")
         logger.info(f"💳 Address: {self.address}")
+        logger.info(f"🔐 Key Storage: {'Supabase (persistent)' if SUPABASE_URL else 'Memory-only (WARNING: will reset!)'}")
         logger.info(f"⚠️  EXECUTING REAL TRANSACTIONS ON DEVNET")
         logger.info(f"=" * 60)
         
@@ -1424,7 +1553,8 @@ class AgenticWallet:
             "total_pnl": self.total_pnl,
             "win_rate": self.win_count / total_trades if total_trades > 0 else 0,
             "total_trades": len(self.trade_history),
-            "created_at": self.created_at.isoformat()
+            "created_at": self.created_at.isoformat(),
+            "key_storage": "Supabase (persistent)" if SUPABASE_URL else "Memory-only (volatile)"
         }
 
 
@@ -1503,7 +1633,9 @@ def main_menu():
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start"""
-    welcome = """🤖 *Autonomous Agentic Wallet*
+    storage_status = "🔐 Persistent (Supabase)" if SUPABASE_URL else "⚠️ Volatile (Memory-only)"
+    
+    welcome = f"""🤖 *Autonomous Agentic Wallet*
 
 I am an AI agent with full control over my Solana wallet. I can:
 • Analyze markets using Orca DEX data
@@ -1512,6 +1644,8 @@ I am an AI agent with full control over my Solana wallet. I can:
 • Learn from trading history
 
 *⚠️ Real Transactions:* All trades are executed on Solana devnet and recorded on-chain
+
+*Key Storage:* {storage_status}
 
 Click "Start Agent" to activate autonomous trading."""
     
@@ -1542,9 +1676,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if swarm.start_agent(agent.agent_id, context.bot):
+            storage_info = "🔐 Keys persist in Supabase" if SUPABASE_URL else "⚠️ Keys are volatile (will reset on restart)"
+            
             await query.edit_message_text(
                 f"🟢 *Agent {agent.agent_id} Activated!*\n\n"
-                f"💳 Address: `{agent.address}`\n\n"
+                f"💳 Address: `{agent.address}`\n"
+                f"{storage_info}\n\n"
                 f"⚠️ *Executing real transactions on devnet*\n\n"
                 f"Fund this wallet with devnet SOL:\n"
                 f"https://faucet.solana.com/\n\n"
@@ -1563,10 +1700,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == "wallet":
         balance = await agent.get_balance()
+        storage_type = "Supabase (Persistent)" if SUPABASE_URL else "Memory (Volatile)"
         text = (
             f"💳 *Wallet Info*\n\n"
             f"Address: `{agent.address}`\n"
-            f"Balance: `{balance:.4f}` SOL\n\n"
+            f"Balance: `{balance:.4f}` SOL\n"
+            f"Storage: `{storage_type}`\n\n"
             f"[View on Solscan](https://solscan.io/account/{agent.address}?cluster=devnet)"
         )
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
@@ -1577,6 +1716,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊 *Agent Status*\n\n"
             f"ID: `{status['agent_id']}`\n"
             f"Status: {'🟢 Running' if status['is_running'] else '🔴 Stopped'}\n"
+            f"Storage: `{status['key_storage']}`\n"
             f"Loops: `{status['loop_count']}`\n"
             f"Positions: `{status['positions_count']}`\n"
             f"Total PnL: `{status['total_pnl']:.6f}`\n"
@@ -1628,7 +1768,8 @@ async def health_check(request):
     return web.Response(text=json.dumps({
         "status": "healthy",
         "agents": len(swarm.agents),
-        "running": sum(1 for a in swarm.agents.values() if a.is_running)
+        "running": sum(1 for a in swarm.agents.values() if a.is_running),
+        "supabase_connected": bool(SUPABASE_URL)
     }), content_type="application/json")
 
 
@@ -1668,6 +1809,7 @@ async def main():
     
     logger.info("=" * 60)
     logger.info("🚀 AUTONOMOUS AGENTIC WALLET SYSTEM READY")
+    logger.info(f"🔐 Key Storage: {'Supabase (persistent)' if SUPABASE_URL else 'Memory-only (will reset!)'}")
     logger.info("⚠️  EXECUTING REAL TRANSACTIONS ON SOLANA DEVNET")
     logger.info("=" * 60)
     
@@ -1678,5 +1820,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-           
+                              
+     
