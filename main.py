@@ -818,7 +818,8 @@ class AIOracle:
         self.api_key = api_key
         self.client = httpx.AsyncClient(timeout=60.0)
         self.base_url = "https://openrouter.ai/api/v1"
-        self.model = "anthropic/claude-3.5-sonnet"
+        self.model = "openai/gpt-3.5-turbo"
+
     
     async def analyze_market(self, market_state: MarketState, context: Dict) -> TradeDecision:
         """Get AI trading decision"""
