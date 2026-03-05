@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 
 # Environment Variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 RPC_URL = os.getenv("RPC_URL", "https://api.devnet.solana.com")
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -57,8 +57,8 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")  # Use service_role key for server-side
 if not TELEGRAM_TOKEN:
     logger.warning("TELEGRAM_TOKEN not set - bot features will be disabled")
 
-if not OPENROUTER_API_KEY:
-    logger.warning("OPENROUTER_API_KEY not set - AI decisions will use fallback")
+if not GROQ_API_KEY:
+    logger.warning("GROQ_API_KEY not set - AI decisions will use fallback")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     logger.warning("SUPABASE_URL or SUPABASE_KEY not set - keys will NOT persist across restarts!")
@@ -930,19 +930,28 @@ class OrcaWhirlpoolClient:
 
 
 class AIOracle:
-    """AI decision engine using OpenRouter"""
+    """AI decision engine using Groq (REPLACED from OpenRouter)"""
     
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key
-        self.client = httpx.AsyncClient(timeout=60.0)
-        self.base_url = "https://openrouter.ai/api/v1"
-        self.model = "openai/gpt-3.5-turbo"
+        self.client = None
+        self.model = "llama-3.3-70b-versatile"  # or "mixtral-8x7b-32768", "gemma2-9b-it"
+        
+        if api_key:
+            try:
+                from groq import Groq
+                self.client = Groq(api_key=api_key)
+                logger.info("✓ Groq AI client initialized")
+            except ImportError:
+                logger.error("✗ groq package not installed. Run: pip install groq")
+            except Exception as e:
+                logger.error(f"✗ Failed to initialize Groq: {e}")
 
     
     async def analyze_market(self, market_state: MarketState, context: Dict) -> TradeDecision:
-        """Get AI trading decision"""
+        """Get AI trading decision using Groq"""
         
-        if not self.api_key:
+        if not self.client:
             return self._fallback_decision(market_state, context)
         
         system_prompt = """You are an elite autonomous crypto trading AI operating on Solana devnet.
@@ -992,28 +1001,24 @@ Respond with JSON:
 }}"""
 
         try:
-            resp = await self.client.post(
-                f"{self.base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://superteam.dev"
-                },
-                json={
-                    "model": self.model,
-                    "messages": [
+            # Groq is synchronous, run in executor to not block
+            import asyncio
+            loop = asyncio.get_event_loop()
+            
+            def _call_groq():
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "temperature": 0.3,
-                    "max_tokens": 800,
-                    "response_format": {"type": "json_object"}
-                }
-            )
+                    temperature=0.3,
+                    max_tokens=800,
+                    response_format={"type": "json_object"}
+                )
             
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
+            response = await loop.run_in_executor(None, _call_groq)
+            content = response.choices[0].message.content
             
             decision_data = json.loads(content)
             
@@ -1085,7 +1090,9 @@ Respond with JSON:
         )
     
     async def close(self):
-        await self.client.aclose()
+        """Cleanup - nothing needed for Groq"""
+        pass
+
 
 
 class AgenticWallet:
@@ -1100,7 +1107,7 @@ class AgenticWallet:
         self.key_manager = SupabaseKeyManager()  # CHANGED: Use SupabaseKeyManager
         self.solana = SolanaClient(RPC_URL)
         self.orca = OrcaWhirlpoolClient(self.solana)
-        self.ai = AIOracle(OPENROUTER_API_KEY)
+        self.ai = AIOracle(GROQ_API_KEY)
         
         # State
         self.positions: List[Position] = []
