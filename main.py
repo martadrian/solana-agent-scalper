@@ -214,29 +214,13 @@ class SupabaseKeyManager:
             try:
                 self.supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
                 logger.info("✓ Supabase client initialized")
-                # Ensure table exists
-                asyncio.create_task(self._ensure_table())
+                logger.info(f"  URL: {SUPABASE_URL[:30]}...")
             except Exception as e:
-                logger.error(f"Failed to initialize Supabase: {e}")
+                logger.error(f"✗ Failed to initialize Supabase: {e}")
+                logger.error(traceback.format_exc())
         else:
-            logger.warning("Supabase not configured - falling back to memory-only (keys will be lost on restart!)")
-    
-    async def _ensure_table(self):
-        """Ensure the wallet_keys table exists with encryption"""
-        if not self.supabase:
-            return
-        
-        try:
-            # Check if table exists by trying to select from it
-            self.supabase.table("wallet_keys").select("*").limit(1).execute()
-            logger.info("✓ wallet_keys table exists")
-        except Exception:
-            logger.info("Creating wallet_keys table...")
-            try:
-                # Note: Run the SQL from previous message in Supabase dashboard first
-                logger.info("Please create the wallet_keys table manually in Supabase dashboard")
-            except Exception as e:
-                logger.error(f"Error checking table: {e}")
+            logger.warning("⚠ Supabase not configured - falling back to memory-only!")
+            logger.warning("  Set SUPABASE_URL and SUPABASE_KEY environment variables")
     
     def get_or_create(self, agent_id: int) -> Keypair:
         """Get existing keypair from Supabase or create new one"""
@@ -253,7 +237,7 @@ class SupabaseKeyManager:
                     logger.info(f"✓ Loaded wallet for agent {agent_id} from Supabase: {keypair.pubkey()}")
                     return keypair
             except Exception as e:
-                logger.warning(f"Could not load from Supabase: {e}")
+                logger.error(f"✗ Could not load from Supabase: {e}")
         
         # Check environment variable (legacy support - for migration only)
         env_key = os.getenv(f"AGENT_{agent_id}_KEY")
@@ -265,10 +249,9 @@ class SupabaseKeyManager:
                 self._keys[agent_id] = kp
                 self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
                 
-                # Migrate to Supabase immediately, then remove from env
+                # Migrate to Supabase immediately
                 if self.supabase:
-                    asyncio.create_task(self._save_to_supabase(agent_id, kp))
-                    logger.info("✓ Migrated key from env to Supabase - you can now remove AGENT_X_KEY from environment variables")
+                    self._save_to_supabase_sync(agent_id, kp)
                 
                 return kp
             except Exception as e:
@@ -279,9 +262,9 @@ class SupabaseKeyManager:
         self._keys[agent_id] = kp
         self._key_hashes[agent_id] = hashlib.sha256(bytes(kp)).hexdigest()[:16]
         
-        # Save to Supabase immediately
+        # Save to Supabase SYNCHRONOUSLY (not async) to ensure it completes
         if self.supabase:
-            asyncio.create_task(self._save_to_supabase(agent_id, kp))
+            self._save_to_supabase_sync(agent_id, kp)
         
         return kp
     
@@ -291,6 +274,7 @@ class SupabaseKeyManager:
             return None
         
         try:
+            logger.info(f"Loading wallet for agent {agent_id} from Supabase...")
             response = self.supabase.table("wallet_keys").select("*").eq("agent_id", agent_id).execute()
             
             if response.data and len(response.data) > 0:
@@ -303,27 +287,30 @@ class SupabaseKeyManager:
                 
                 # Verify pubkey matches
                 if str(kp.pubkey()) != record["pubkey"]:
-                    logger.error("Public key mismatch! Possible corruption.")
+                    logger.error("✗ Public key mismatch! Possible corruption.")
                     return None
                 
+                logger.info(f"✓ Successfully loaded wallet from Supabase")
                 return kp
             
+            logger.info(f"No existing wallet found for agent {agent_id}")
             return None
             
         except Exception as e:
-            logger.error(f"Error loading from Supabase: {e}")
+            logger.error(f"✗ Error loading from Supabase: {e}")
+            logger.error(traceback.format_exc())
             return None
     
-    async def _save_to_supabase(self, agent_id: int, keypair: Keypair):
-        """Save encrypted key to Supabase"""
+    def _save_to_supabase_sync(self, agent_id: int, keypair: Keypair):
+        """Save encrypted key to Supabase SYNCHRONOUSLY"""
         if not self.supabase:
+            logger.warning("Cannot save - Supabase not configured")
             return
         
         try:
             secret_b64 = base64.b64encode(bytes(keypair)).decode()
             pubkey = str(keypair.pubkey())
             
-            # Upsert (insert or update)
             data = {
                 "agent_id": agent_id,
                 "encrypted_key": secret_b64,
@@ -331,15 +318,19 @@ class SupabaseKeyManager:
                 "updated_at": datetime.now().isoformat()
             }
             
+            logger.info(f"Saving wallet for agent {agent_id} to Supabase...")
             response = self.supabase.table("wallet_keys").upsert(data).execute()
             
             if response.data:
-                logger.info(f"✓ Saved wallet for agent {agent_id} to Supabase (encrypted)")
+                logger.info(f"✓ Successfully saved wallet to Supabase!")
+                logger.info(f"  Agent ID: {agent_id}")
+                logger.info(f"  Public Key: {pubkey}")
             else:
-                logger.error(f"Failed to save to Supabase: {response}")
+                logger.error(f"✗ Failed to save to Supabase: {response}")
                 
         except Exception as e:
-            logger.error(f"Error saving to Supabase: {e}")
+            logger.error(f"✗ Error saving to Supabase: {e}")
+            logger.error(traceback.format_exc())
     
     def _generate_new(self, agent_id: int) -> Keypair:
         """Generate new keypair - PRIVATE KEY NEVER LOGGED"""
@@ -348,10 +339,9 @@ class SupabaseKeyManager:
         logger.info(f"GENERATED NEW WALLET FOR AGENT {agent_id}")
         logger.info(f"Public Key: {kp.pubkey()}")
         logger.info(f"=" * 60)
-        logger.info(f"✓ Key encrypted and saved to Supabase (NOT shown in logs)")
+        logger.info(f"✓ Key will be encrypted and saved to Supabase")
         logger.info(f"⚠️  Backup: Export from Supabase dashboard if needed")
         logger.info(f"=" * 60)
-        # Private key goes ONLY to Supabase, never to console
         return kp
     
     def sign_transaction(self, agent_id: int, transaction: VersionedTransaction) -> VersionedTransaction:
@@ -369,6 +359,7 @@ class SupabaseKeyManager:
     
     def get_pubkey(self, agent_id: int) -> Pubkey:
         return self.get_or_create(agent_id).pubkey()
+
 
 
 class SecurityError(Exception):
