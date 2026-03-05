@@ -3,3 +3,4 @@ supabase==2.3.4
 python-telegram-bot==20.7
 solders==0.21.0
 aiohttp==3.9.1
+groq>=0.4.0
